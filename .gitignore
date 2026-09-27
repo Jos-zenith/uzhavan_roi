@@ -25,3 +25,9 @@ yarn-error.log*
 # typescript
 *.tsbuildinfo
 next-env.d.ts
+/lib/generated/prisma
+
+# local SQLite telemetry warehouse
+/db/*.db
+/db/*.db-journal
+/lib/generated/tnimpact

@@ -1,0 +1,112 @@
+// TN IMPACT — Feature ROI telemetry.
+// Every feature declares its KPIs up front (Feature + FeatureKpi), the shared
+// SDK emits Events keyed by feature flag, and CostEntry holds the cost side.
+
+generator client {
+  provider = "prisma-client"
+  output   = "../lib/generated/tnimpact"
+}
+
+datasource db {
+  provider = "sqlite"
+}
+
+/// Organisation-wide KPI catalogue. Features may only use KPIs defined here,
+/// so every team computes "conversion" or "tickets per 1k users" the same way.
+model KpiDefinition {
+  id                String   @id @default(cuid())
+  key               String   @unique
+  name              String
+  description       String
+  category          String // REVENUE | COST | PRODUCTIVITY | RISK | EXPERIENCE
+  unit              String // RATIO | SECONDS | PER_1K
+  direction         String // UP | DOWN — which way is better
+  calculation       String // USER_RATIO | MEAN_VALUE | RATE_PER_1K
+  numeratorAction   String
+  denominatorAction String?
+  createdAt         DateTime @default(now())
+
+  featureKpis FeatureKpi[]
+}
+
+/// A feature and its metrics & telemetry spec. `key` is the feature flag
+/// every event about this feature must carry.
+model Feature {
+  id                  String    @id @default(cuid())
+  key                 String    @unique
+  name                String
+  summary             String
+  owner               String
+  team                String
+  status              String    @default("DRAFT") // DRAFT | SPEC_APPROVED | IN_DEVELOPMENT | SHIPPED | RETIRED
+  goals               String // JSON: [{ type, statement }], 1–3 entries
+  attributionMethod   String // AB_TEST | PHASED_ROLLOUT | PRE_POST
+  segment             String
+  minSamplePerArm     Int
+  observationDays     Int
+  horizonMonths       Int       @default(12)
+  qualitativeBenefits String    @default("")
+  productApproved     Boolean   @default(false)
+  engineeringApproved Boolean   @default(false)
+  analyticsApproved   Boolean   @default(false)
+  releaseVersion      String?
+  releasedAt          DateTime?
+  decision            String? // SCALE | ITERATE | RETIRE
+  decisionNote        String?
+  decidedAt           DateTime?
+  createdAt           DateTime  @default(now())
+  updatedAt           DateTime  @updatedAt
+
+  kpis  FeatureKpi[]
+  costs CostEntry[]
+}
+
+/// A KPI a feature commits to moving, with its baseline, target and the
+/// rule for turning a KPI change into money.
+model FeatureKpi {
+  id            String @id @default(cuid())
+  featureId     String
+  kpiId         String
+  baseline      Float
+  targetDelta   Float // signed, in KPI units (0.05 = +5 pp for a ratio)
+  monthlyVolume Float // units the KPI applies to per month at full rollout
+  valuePerUnit  Float // ₹ per unit of improvement per volume unit
+
+  feature Feature       @relation(fields: [featureId], references: [id], onDelete: Cascade)
+  kpi     KpiDefinition @relation(fields: [kpiId], references: [id])
+
+  @@unique([featureId, kpiId])
+}
+
+model CostEntry {
+  id         String   @id @default(cuid())
+  featureId  String
+  category   String // DEVELOPMENT | INFRASTRUCTURE | SUPPORT | MAINTENANCE
+  recurrence String // ONE_TIME | MONTHLY
+  amount     Float
+  note       String   @default("")
+  createdAt  DateTime @default(now())
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+}
+
+/// The common event schema. Not a foreign key to Feature on purpose: events
+/// for unregistered flags are still stored and surfaced as a governance gap.
+model Event {
+  id          String   @id @default(cuid())
+  eventId     String   @unique // client-generated, for idempotent retries
+  timestamp   DateTime
+  receivedAt  DateTime @default(now())
+  app         String
+  release     String
+  userId      String
+  sessionId   String
+  featureFlag String?
+  variant     String? // control | treatment
+  action      String
+  value       Float?
+  context     String   @default("{}")
+
+  @@index([featureFlag, action])
+  @@index([action, timestamp])
+}

@@ -1,11 +1,7 @@
 /** @type {import('next').NextConfig} */
 const nextConfig = {
-  typescript: {
-    ignoreBuildErrors: true,
-  },
-  images: {
-    unoptimized: true,
-  },
+  // Native SQLite driver must be loaded by Node, not bundled.
+  serverExternalPackages: ["better-sqlite3", "@prisma/adapter-better-sqlite3"],
 }
 
 export default nextConfig

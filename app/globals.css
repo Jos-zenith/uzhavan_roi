@@ -113,3 +113,23 @@
     @apply bg-background text-foreground;
   }
 }
+
+/* Data-viz & status tokens (dark surface). Diverging pair for ROI polarity;
+   status colours are reserved for verdicts and always ship with icon + label. */
+:root {
+  --viz-positive: #3987e5;
+  --viz-negative: #e66767;
+  --viz-neutral: #383835;
+  --status-good: #0ca30c;
+  --status-warning: #fab219;
+  --status-critical: #d03b3b;
+}
+
+@theme inline {
+  --color-viz-positive: var(--viz-positive);
+  --color-viz-negative: var(--viz-negative);
+  --color-viz-neutral: var(--viz-neutral);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-critical: var(--status-critical);
+}

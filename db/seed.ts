@@ -86,6 +86,16 @@ function emit(
 const DISTRICTS = ["Thanjavur", "Madurai", "Coimbatore", "Tiruchirappalli", "Salem", "Tirunelveli", "Villupuram", "Erode"]
 
 async function main() {
+  // Seeding wipes every table. Never do that to a database with data in it by accident.
+  const existing = await db.feature.count()
+  if (existing > 0 && !process.argv.includes("--reset")) {
+    console.error(
+      `Refusing to seed: this database already has ${existing} features, and seeding deletes everything.\n` +
+        "If you really want to replace it with demo data, run: npm run db:seed -- --reset",
+    )
+    process.exit(1)
+  }
+
   await db.event.deleteMany()
   await db.reviewNote.deleteMany()
   await db.costEntry.deleteMany()

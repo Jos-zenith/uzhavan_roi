@@ -1,11 +1,24 @@
-import { PrismaBetterSqlite3 } from "@prisma/adapter-better-sqlite3"
+import { PrismaPg } from "@prisma/adapter-pg"
 import { PrismaClient } from "./generated/tnimpact/client"
 
-const url = process.env.TELEMETRY_DB_URL ?? "file:./db/dev.db"
+function createClient() {
+  const connectionString = process.env.DATABASE_URL
+  if (!connectionString?.startsWith("postgres")) {
+    throw new Error(
+      "DATABASE_URL must be a direct postgres:// connection string. " +
+        "Locally: run `npx prisma dev` and use its TCP URL. On Vercel: add a Postgres database under Storage.",
+    )
+  }
+  // Each serverless instance opens its own pool, so keep it small. Pages fire many
+  // queries in parallel; a capped pool queues them instead of opening a connection
+  // per query (which exhausts hosted limits and crashes `prisma dev` locally).
+  const max = Number(process.env.DATABASE_POOL_MAX) || 3
+  return new PrismaClient({ adapter: new PrismaPg({ connectionString, max }) })
+}
 
+// One client per process; reused across hot reloads in dev and warm invocations on Vercel.
 const globalForPrisma = globalThis as unknown as { prisma?: PrismaClient }
 
-export const db =
-  globalForPrisma.prisma ?? new PrismaClient({ adapter: new PrismaBetterSqlite3({ url }) })
+export const db = globalForPrisma.prisma ?? createClient()
 
-if (process.env.NODE_ENV !== "production") globalForPrisma.prisma = db
+globalForPrisma.prisma = db

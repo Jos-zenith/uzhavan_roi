@@ -8,6 +8,8 @@ export default defineConfig({
     seed: "tsx db/seed.ts",
   },
   datasource: {
-    url: process.env.TELEMETRY_DB_URL ?? "file:./db/dev.db",
+    // CLI only (migrate, seed): prefer a direct connection. Vercel's Neon integration sets
+    // DATABASE_URL (pooled, used by the app at runtime) and DATABASE_URL_UNPOOLED (direct).
+    url: process.env.DATABASE_URL_UNPOOLED ?? process.env.DATABASE_URL ?? "",
   },
 });

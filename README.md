@@ -15,14 +15,28 @@ cost or improve experience, and investment decisions become political.
 
 ## Run it
 
+The warehouse is Postgres. Locally, Prisma runs one for you:
+
 ```bash
 npm install
-npm run db:setup     # migrate SQLite, generate the client, seed demo data
-npm run dev          # http://localhost:3000
+npx prisma dev -n impact -d        # local Postgres; `npx prisma dev ls` shows its TCP URL
+# put that postgres://… TCP URL in .env as DATABASE_URL
+npm run db:setup                   # migrate, generate the client, seed demo data
+npm run dev                        # http://localhost:3000
 ```
 
-No database server is needed: the warehouse is SQLite at `db/dev.db`. Set `TELEMETRY_DB_URL` to point it
-elsewhere.
+### Deploying to Vercel
+
+1. In the Vercel project, open **Storage → Create Database → Neon (Postgres)** and connect it to the project.
+   This sets `DATABASE_URL` (pooled, used by the app) and `DATABASE_URL_UNPOOLED` (direct, used for migrations).
+2. Redeploy. The build runs `prisma migrate deploy` before `next build`, so the schema is created or updated
+   on every deploy, and a missing database fails the build instead of serving 500s.
+3. Load the demo data **once**, from your machine, using the direct connection string from Neon:
+   `DATABASE_URL="postgres://…" npm run db:seed`. Seeding refuses to run on a database that already has
+   data unless you add `-- --reset`, because it deletes everything.
+
+`DATABASE_POOL_MAX` (default 3) caps connections per server instance. Pages run many queries in parallel,
+so an uncapped pool per serverless instance exhausts hosted connection limits quickly.
 
 ## Demo script (5 minutes)
 

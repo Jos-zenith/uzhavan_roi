@@ -11,28 +11,42 @@ import {
   formatKpiDelta,
   formatKpiValue,
   formatPct,
+  kpiFormula,
   parseGoals,
   type AttributionMethod,
   type Decision,
 } from "@/lib/domain"
 import { CheckRow, RecommendationBadge, StatusBadge } from "@/components/badges"
 import { AdoptionChart } from "@/components/adoption-chart"
-import { Approvals, AdvanceButton, CostForm, DecisionForm } from "./controls"
+import { JsonInspector } from "@/components/json-inspector"
+import { KpiIcon } from "@/components/kpi-icon"
+import { featureHeadline, money } from "@/lib/narrative"
+import { Approvals, AdvanceButton, CostForm, DecisionForm, NoteForm } from "./controls"
 import { cn } from "@/lib/utils"
 
 export const dynamic = "force-dynamic"
 
-export default async function FeaturePage({ params }: { params: Promise<{ key: string }> }) {
+export default async function FeaturePage({
+  params,
+  searchParams,
+}: {
+  params: Promise<{ key: string }>
+  searchParams: Promise<{ recovered?: string }>
+}) {
   const { key } = await params
+  const recovered = Number((await searchParams).recovered) || 0
   const f = await db.feature.findUnique({ where: { key }, ...featureWithSpec })
   if (!f) notFound()
 
-  const [report, gate, inst, adoption] = await Promise.all([
+  const [report, gate, inst, adoption, notes] = await Promise.all([
     buildReport(f),
     gateFor(f),
     instrumentationStatus(f),
     weeklyAdoption(f.key),
+    db.reviewNote.findMany({ where: { featureId: f.id }, orderBy: { createdAt: "desc" } }),
   ])
+  const kpiDefs = new Map(f.kpis.map((fk) => [fk.kpi.key, fk.kpi]))
+  const headline = featureHeadline(f, report, gate)
   const goals = parseGoals(f.goals)
   const method = f.attributionMethod as AttributionMethod
   const live = f.status === "SHIPPED" || f.status === "RETIRED"
@@ -47,14 +61,32 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
         <div className="flex flex-wrap items-center gap-2">
           <StatusBadge status={f.status} />
           <code className="rounded bg-secondary px-1.5 py-0.5 font-mono text-xs">{f.key}</code>
-          {f.releaseVersion && <span className="text-xs text-muted-foreground">released in {f.releaseVersion}</span>}
+          {f.releaseVersion && (
+            <span className="font-mono text-xs text-muted-foreground">
+              released {f.releaseVersion}
+              {f.releasedAt && ` · ${f.releasedAt.toISOString().slice(0, 10)}`}
+            </span>
+          )}
+          <JsonInspector url={`/api/features/${f.key}`} title={`${f.name}: spec, gate and report`} className="ml-auto" />
         </div>
-        <h1 className="text-3xl font-bold">{f.name}</h1>
-        <p className="max-w-3xl text-muted-foreground">{f.summary}</p>
-        <p className="text-sm text-muted-foreground">
-          Owner: <span className="text-foreground">{f.owner}</span> · Team: <span className="text-foreground">{f.team}</span>
+        <p className="text-sm font-medium uppercase tracking-wide text-primary">
+          {f.name} · {f.team}
+        </p>
+        <h1 className="max-w-4xl text-3xl leading-tight">{headline.headline}</h1>
+        <p className="max-w-3xl text-lg text-muted-foreground">{headline.detail}</p>
+        <p className="max-w-3xl pt-2 text-sm text-muted-foreground">
+          <span className="text-foreground">What it is:</span> {f.summary} Owned by{" "}
+          <span className="text-foreground">{f.owner}</span>.
         </p>
       </section>
+
+      {recovered > 0 && (
+        <p className="rounded-xl border border-status-good/40 bg-status-good/10 px-4 py-3 text-sm">
+          ✓ Spec registered. <strong>{recovered.toLocaleString("en-IN")} quarantined events</strong> for{" "}
+          <code className="font-mono text-xs">{f.key}</code> were released and now count toward instrumentation and
+          KPIs.
+        </p>
+      )}
 
       {/* Lifecycle */}
       <ol className="flex flex-wrap gap-2 text-xs" aria-label="Lifecycle">
@@ -81,20 +113,35 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
               <span className="text-sm text-muted-foreground">{rec.reason}</span>
             </div>
             <div className="grid grid-cols-2 gap-4 sm:grid-cols-4">
-              <Figure label="ROI" value={formatPct(report.roi)} />
-              <Figure label={`Proven benefit (${f.horizonMonths} mo)`} value={formatInr(report.totalBenefit)} />
-              <Figure label={`Total cost (${f.horizonMonths} mo)`} value={formatInr(report.totalCost)} />
-              <Figure label="Observed" value={`${report.observedDays} / ${f.observationDays} days`} />
+              <Figure label="Return on cost" value={formatPct(report.roi)} />
+              <Figure label={`Proven value, ${f.horizonMonths} mo`} value={money(report.totalBenefit)} />
+              <Figure label={`Cost, ${f.horizonMonths} mo`} value={money(report.totalCost)} />
+              <Figure
+                label={report.windowMet ? `Days measured (needed ${f.observationDays})` : "Days measured"}
+                value={report.windowMet ? `${report.observedDays}` : `${report.observedDays} of ${f.observationDays}`}
+              />
             </div>
-            <p className="mt-4 text-xs text-muted-foreground">
-              ROI = ({formatInr(report.monthlyBenefit)}/mo × {f.horizonMonths} − ({formatInr(report.oneTimeCost)} +{" "}
-              {formatInr(report.monthlyCost)}/mo × {f.horizonMonths})) ÷ total cost. Benefits count only KPI changes
-              with p &lt; {SIGNIFICANCE}.
-            </p>
+            <details className="mt-4 text-sm">
+              <summary className="cursor-pointer text-muted-foreground hover:text-foreground">How this is calculated</summary>
+              <div className="mt-2 space-y-1 font-mono text-xs text-muted-foreground">
+                <p>
+                  value = {formatInr(report.monthlyBenefit)}/mo × {f.horizonMonths} = {formatInr(report.totalBenefit)}
+                </p>
+                <p>
+                  cost = {formatInr(report.oneTimeCost)} + {formatInr(report.monthlyCost)}/mo × {f.horizonMonths} ={" "}
+                  {formatInr(report.totalCost)}
+                </p>
+                <p>return on cost = (value − cost) ÷ cost = {formatPct(report.roi)}</p>
+                <p className="font-sans">
+                  Only KPI changes with p &lt; {SIGNIFICANCE} count as value. Each KPI&apos;s monthly value = its proven
+                  improvement × monthly volume × ₹ per unit, from the spec below.
+                </p>
+              </div>
+            </details>
           </div>
           <div className="rounded-xl border border-border bg-card p-6">
-            <h2 className="mb-1 font-semibold">Leading indicator</h2>
-            <p className="mb-3 text-xs text-muted-foreground">Weekly users exposed to the feature (treatment)</p>
+            <h2 className="mb-1 font-semibold">Who&apos;s using it</h2>
+            <p className="mb-3 text-xs text-muted-foreground">Farmers who saw the feature each week (treatment group)</p>
             <AdoptionChart weeks={adoption.map((w) => ({ label: w.weekStart.toISOString().slice(0, 10), users: w.users }))} />
           </div>
         </section>
@@ -102,7 +149,7 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
 
       {/* KPI results */}
       <section className="space-y-3">
-        <h2 className="text-lg font-semibold">KPIs: declared targets vs measured impact</h2>
+        <h2 className="text-lg font-semibold">What we promised vs what happened</h2>
         <div className="overflow-x-auto rounded-xl border border-border">
           <table className="w-full min-w-[860px] text-sm">
             <thead className="bg-secondary/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
@@ -123,8 +170,18 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
                 return (
                   <tr key={k.featureKpiId} className="border-t border-border align-top">
                     <td className="px-4 py-3">
-                      <div className="font-medium">{k.name}</div>
-                      <div className="text-xs text-muted-foreground">{k.direction === "UP" ? "higher is better" : "lower is better"}</div>
+                      <div className="flex gap-3">
+                        <KpiIcon category={k.category} />
+                        <div>
+                          <div className="font-medium">{k.name}</div>
+                          <div className="text-xs text-muted-foreground">{k.direction === "UP" ? "higher is better" : "lower is better"}</div>
+                          {kpiDefs.get(k.key) && (
+                            <div className="mt-1 font-mono text-[11px] leading-4 text-muted-foreground" title={kpiFormula(kpiDefs.get(k.key)!).test}>
+                              {kpiFormula(kpiDefs.get(k.key)!).formula}
+                            </div>
+                          )}
+                        </div>
+                      </div>
                     </td>
                     <td className="px-4 py-3 tabular-nums text-muted-foreground">
                       {formatKpiValue(k.baseline, k.unit)} → {formatKpiValue(k.target, k.unit)}
@@ -154,7 +211,7 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
                         <span className="text-muted-foreground">no proven change</span>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{live ? formatInr(k.monthlyBenefit) : "—"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums">{live ? formatInr(k.monthlyBenefit) : "—"}</td>
                   </tr>
                 )
               })}
@@ -217,7 +274,7 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
             <AdvanceButton featureKey={f.key} next={gate.next} ready={gate.checks.every((c) => c.ok)} />
           </section>
         ) : f.status === "SHIPPED" ? (
-          <section className="space-y-4 rounded-xl border border-border bg-card p-6">
+          <section id="review" className="scroll-mt-20 space-y-4 rounded-xl border border-border bg-card p-6">
             <h2 className="text-lg font-semibold">Portfolio review</h2>
             {f.decision && (
               <p className="text-sm">
@@ -294,6 +351,45 @@ export default async function FeaturePage({ params }: { params: Promise<{ key: s
           </details>
         </section>
       </div>
+
+      {/* Review log */}
+      <section className="space-y-4 rounded-xl border border-border bg-card p-6">
+        <div>
+          <h2 className="text-lg font-semibold">Review log</h2>
+          <p className="text-sm text-muted-foreground">
+            What the owner saw, decided and why, plus every gate outcome, including refusals.
+          </p>
+        </div>
+        <NoteForm featureKey={f.key} defaultAuthor={f.owner} />
+        {notes.length === 0 ? (
+          <p className="text-sm text-muted-foreground">Nothing logged yet.</p>
+        ) : (
+          <ol className="space-y-0">
+            {notes.map((n) => (
+              <li key={n.id} className="grid grid-cols-[6.5rem_1fr] gap-3 border-t border-border py-3 text-sm first:border-0">
+                <time className="font-mono text-xs text-muted-foreground" dateTime={n.createdAt.toISOString()}>
+                  {n.createdAt.toISOString().slice(0, 10)}
+                  <br />
+                  {n.createdAt.toISOString().slice(11, 16)} UTC
+                </time>
+                <div className="min-w-0">
+                  <div className="mb-0.5 flex flex-wrap items-center gap-2 text-xs">
+                    <span className={n.kind === "SYSTEM" ? "font-mono text-muted-foreground" : "font-medium text-foreground"}>{n.author}</span>
+                    {n.kind !== "NOTE" && (
+                      <span className="rounded border border-border px-1.5 py-px font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                        {n.kind === "DECISION" ? "decision" : "system"}
+                      </span>
+                    )}
+                  </div>
+                  <p className={cn("whitespace-pre-line", n.kind === "SYSTEM" && "font-mono text-xs text-muted-foreground")}>
+                    {n.body.split("`").map((part, i) => (i % 2 ? <code key={i} className="font-mono text-xs">{part}</code> : part))}
+                  </p>
+                </div>
+              </li>
+            ))}
+          </ol>
+        )}
+      </section>
     </div>
   )
 }

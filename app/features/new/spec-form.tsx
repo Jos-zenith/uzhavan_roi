@@ -33,11 +33,11 @@ const slug = (s: string) =>
 const unitHint = (unit?: string) => (unit === "RATIO" ? "%" : unit === "SECONDS" ? "seconds" : "per 1k users")
 const toStored = (v: string, unit?: string) => (unit === "RATIO" ? Number(v) / 100 : Number(v))
 
-export function SpecForm({ kpis }: { kpis: KpiOption[] }) {
+export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag?: string }) {
   const router = useRouter()
   const [name, setName] = useState("")
-  const [key, setKey] = useState("")
-  const [keyTouched, setKeyTouched] = useState(false)
+  const [key, setKey] = useState(initialFlag ?? "")
+  const [keyTouched, setKeyTouched] = useState(!!initialFlag)
   const [summary, setSummary] = useState("")
   const [owner, setOwner] = useState("")
   const [team, setTeam] = useState("")
@@ -90,7 +90,7 @@ export function SpecForm({ kpis }: { kpis: KpiOption[] }) {
     setSaving(false)
     const data = await res.json().catch(() => ({}))
     if (!res.ok) return setError(data.error ?? "Could not save the spec")
-    router.push(`/features/${key}`)
+    router.push(`/features/${key}${data.recoveredEvents ? `?recovered=${data.recoveredEvents}` : ""}`)
   }
 
   return (

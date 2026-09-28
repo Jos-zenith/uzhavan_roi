@@ -152,6 +152,37 @@ export function CostForm({ featureKey }: { featureKey: string }) {
   )
 }
 
+export function NoteForm({ featureKey, defaultAuthor }: { featureKey: string; defaultAuthor: string }) {
+  const { send, pending, error } = useMutation(featureKey)
+  const [author, setAuthor] = useState(defaultAuthor)
+  const [body, setBody] = useState("")
+  return (
+    <form
+      className="space-y-2"
+      onSubmit={async (e) => {
+        e.preventDefault()
+        if (await send("/notes", "POST", { author, body })) setBody("")
+      }}
+    >
+      <textarea
+        className={cn(input, "h-16 w-full py-2")}
+        placeholder="What did you see, what are you changing, what would change your mind?"
+        value={body}
+        onChange={(e) => setBody(e.target.value)}
+        aria-label="Note"
+        required
+      />
+      <div className="flex flex-wrap items-center gap-2">
+        <input className={cn(input, "w-60")} value={author} onChange={(e) => setAuthor(e.target.value)} aria-label="Author" required />
+        <Button type="submit" size="sm" variant="secondary" disabled={pending || body.trim().length < 3}>
+          Add to log
+        </Button>
+      </div>
+      {error && <p className="text-sm text-destructive">{error}</p>}
+    </form>
+  )
+}
+
 export function DecisionForm({ featureKey, suggested }: { featureKey: string; suggested: Decision | null }) {
   const { send, pending, error } = useMutation(featureKey)
   const [note, setNote] = useState("")

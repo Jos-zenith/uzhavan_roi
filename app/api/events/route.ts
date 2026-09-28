@@ -1,8 +1,13 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
+import { registeredFlags, releaseQuarantine } from "@/lib/registry"
 import { ingestBatchSchema } from "@/lib/telemetry/schema"
 
-/** Ingest endpoint for the telemetry SDK. Idempotent on `eventId`. */
+/**
+ * Ingest endpoint for the telemetry SDK. Validates against the common schema,
+ * is idempotent on `eventId`, and quarantines events whose feature flag has
+ * no registered spec.
+ */
 export async function POST(req: Request) {
   let body: unknown
   try {
@@ -24,10 +29,32 @@ export async function POST(req: Request) {
   const seen = new Set(existing.map((e) => e.eventId))
   const fresh = events.filter((e, i) => !seen.has(e.eventId) && events.findIndex((x) => x.eventId === e.eventId) === i)
 
+  const flags = fresh.map((e) => e.featureFlag).filter((f): f is string => !!f)
+  const registered = await registeredFlags(flags)
+  const isQuarantined = (flag: string | null) => !!flag && !registered.has(flag)
+  const quarantinedFlags = [...new Set(flags.filter(isQuarantined))]
+
   if (fresh.length > 0) {
     await db.event.createMany({
-      data: fresh.map((e) => ({ ...e, timestamp: new Date(e.timestamp), context: JSON.stringify(e.context) })),
+      data: fresh.map((e) => ({
+        ...e,
+        timestamp: new Date(e.timestamp),
+        context: JSON.stringify(e.context),
+        quarantined: isQuarantined(e.featureFlag),
+      })),
     })
   }
-  return NextResponse.json({ accepted: fresh.length, duplicates: events.length - fresh.length })
+  // A spec registered while this batch was in flight has already run its
+  // release, so release again for any flag that is registered by now.
+  if (quarantinedFlags.length > 0) {
+    const nowRegistered = await registeredFlags(quarantinedFlags)
+    await Promise.all([...nowRegistered].map(releaseQuarantine))
+  }
+
+  return NextResponse.json({
+    accepted: fresh.length,
+    quarantined: fresh.filter((e) => isQuarantined(e.featureFlag)).length,
+    quarantinedFlags,
+    duplicates: events.length - fresh.length,
+  })
 }

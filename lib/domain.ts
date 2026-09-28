@@ -67,6 +67,15 @@ export type CostRecurrence = (typeof COST_RECURRENCES)[number]
 export const DECISIONS = ["SCALE", "ITERATE", "RETIRE"] as const
 export type Decision = (typeof DECISIONS)[number]
 
+/** The exact calculation and significance test behind a catalogue KPI, as shown to reviewers. */
+export function kpiFormula(k: { calculation: string; numeratorAction: string; denominatorAction: string | null }) {
+  if (k.calculation === "MEAN_VALUE") return { formula: `mean(value of ${k.numeratorAction})`, test: "Welch's test on means" }
+  if (k.calculation === "RATE_PER_1K") {
+    return { formula: `count(${k.numeratorAction}) ÷ users(${k.denominatorAction}) × 1000`, test: "Welch's test on per-user counts" }
+  }
+  return { formula: `users(${k.numeratorAction}) ÷ users(${k.denominatorAction})`, test: "two-proportion z-test" }
+}
+
 export function parseGoals(json: string): Goal[] {
   try {
     const v = JSON.parse(json)

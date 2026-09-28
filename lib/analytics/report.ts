@@ -1,5 +1,6 @@
 import { db } from "@/lib/db"
 import type { AttributionMethod, KpiCalculation } from "@/lib/domain"
+import { ADMITTED } from "@/lib/registry"
 import { moments, twoProportion, welch, type TestResult } from "./stats"
 import type { Prisma } from "@/lib/generated/tnimpact/client"
 
@@ -30,6 +31,9 @@ export type KpiResult = {
   key: string
   name: string
   unit: string
+  category: string
+  /** what an arm's `n` counts: users for ratio and per-1k KPIs, events for means */
+  sampleUnit: "users" | "events"
   direction: string
   baseline: number
   target: number
@@ -84,6 +88,7 @@ async function loadEvents(feature: FeatureWithSpec, actions: string[]): Promise<
     const span = feature.observationDays * DAY
     const rows = await db.event.findMany({
       where: {
+        ...ADMITTED,
         action: { in: actions },
         OR: [{ featureFlag: null }, { featureFlag: feature.key }],
         timestamp: { gte: new Date(released - span), lt: new Date(released + span) },
@@ -96,7 +101,7 @@ async function loadEvents(feature: FeatureWithSpec, actions: string[]): Promise<
     }
   }
   const rows = await db.event.findMany({
-    where: { featureFlag: feature.key, action: { in: actions }, variant: { in: ["control", "treatment"] } },
+    where: { ...ADMITTED, featureFlag: feature.key, action: { in: actions }, variant: { in: ["control", "treatment"] } },
     select,
   })
   return {
@@ -157,6 +162,8 @@ function kpiResult(fk: FeatureKpiWithDef, control: EventRow[], treatment: EventR
     key: kpi.key,
     name: kpi.name,
     unit: kpi.unit,
+    category: kpi.category,
+    sampleUnit: calc === "MEAN_VALUE" ? "events" : "users",
     direction: kpi.direction,
     baseline: fk.baseline,
     target: fk.baseline + fk.targetDelta,
@@ -190,7 +197,7 @@ function recommend(feature: FeatureWithSpec, r: Omit<FeatureReport, "recommendat
       reason: `Needs ${feature.minSamplePerArm} users per arm; smallest arm has ${Math.min(...r.kpis.flatMap((k) => [k.control.n, k.treatment.n]))}.`,
     }
   }
-  const worse = r.kpis.filter((k) => k.significant && (k.improvement ?? 0) < 0).map((k) => k.name)
+  const worse = r.kpis.filter((k) => k.significant && (k.improvement ?? 0) < 0).map((k) => k.name.toLowerCase())
   const roi = r.roi ?? -1
   if (roi >= 0.5) return { kind: "SCALE", reason: `Proven ROI of ${(roi * 100).toFixed(0)}% over ${feature.horizonMonths} months.` }
   if (roi >= 0) return { kind: "ITERATE", reason: "Pays back, but below the 50% bar for scaling. Improve the weakest KPI." }
@@ -199,7 +206,7 @@ function recommend(feature: FeatureWithSpec, r: Omit<FeatureReport, "recommendat
     kind: "RETIRE",
     reason:
       worse.length > 0
-        ? `Significantly worsened ${worse.join(", ")}; costs exceed proven benefits.`
+        ? `Made ${worse.join(" and ")} significantly worse, and costs exceed proven benefits.`
         : proven === 0
           ? "No KPI moved significantly after the full observation window."
           : "Proven benefits don't cover the cost.",
@@ -246,7 +253,7 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
 export async function weeklyAdoption(featureKey: string, weeks = 8, now = new Date()) {
   const start = new Date(now.getTime() - weeks * 7 * DAY)
   const rows = await db.event.findMany({
-    where: { featureFlag: featureKey, action: "feature_exposed", variant: "treatment", timestamp: { gte: start } },
+    where: { ...ADMITTED, featureFlag: featureKey, action: "feature_exposed", variant: "treatment", timestamp: { gte: start } },
     select: { userId: true, timestamp: true },
   })
   const buckets = Array.from({ length: weeks }, (_, i) => ({

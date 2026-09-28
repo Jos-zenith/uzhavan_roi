@@ -3,6 +3,7 @@ import { z } from "zod"
 import { db } from "@/lib/db"
 import { ATTRIBUTION_METHODS, GOAL_TYPES } from "@/lib/domain"
 import { buildReport, featureWithSpec } from "@/lib/analytics/report"
+import { releaseQuarantine } from "@/lib/registry"
 
 export async function GET() {
   const features = await db.feature.findMany({ ...featureWithSpec, orderBy: { createdAt: "asc" } })
@@ -56,5 +57,17 @@ export async function POST(req: Request) {
   const feature = await db.feature.create({
     data: { ...spec, goals: JSON.stringify(goals), kpis: { create: kpis } },
   })
-  return NextResponse.json(feature, { status: 201 })
+  // Registering the flag admits any events that arrived before the spec did.
+  const recoveredEvents = await releaseQuarantine(feature.key)
+  await db.reviewNote.create({
+    data: {
+      featureId: feature.id,
+      kind: "SYSTEM",
+      author: "Registry",
+      body: `Spec registered by ${feature.owner}; flag \`${feature.key}\` admitted to analytics${
+        recoveredEvents > 0 ? `. Released ${recoveredEvents} quarantined events that arrived before the spec` : ""
+      }.`,
+    },
+  })
+  return NextResponse.json({ ...feature, recoveredEvents }, { status: 201 })
 }

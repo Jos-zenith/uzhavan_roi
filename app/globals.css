@@ -3,58 +3,56 @@
 
 @custom-variant dark (&:is(.dark *));
 
+/* Paper and ink: a warm, light working surface with an earthy accent.
+   Contrast checked for body text (ink on paper ≈ 15:1, muted ≈ 5.4:1). */
 :root {
-  /* Dark theme as default - inspired by Vercel dashboard */
-  --background: oklch(0.09 0 0);
-  --foreground: oklch(0.95 0 0);
-  --card: oklch(0.13 0 0);
-  --card-foreground: oklch(0.95 0 0);
-  --popover: oklch(0.13 0 0);
-  --popover-foreground: oklch(0.95 0 0);
-  --primary: oklch(0.72 0.19 160);
-  --primary-foreground: oklch(0.09 0 0);
-  --secondary: oklch(0.18 0 0);
-  --secondary-foreground: oklch(0.95 0 0);
-  --muted: oklch(0.18 0 0);
-  --muted-foreground: oklch(0.6 0 0);
-  --accent: oklch(0.72 0.19 160);
-  --accent-foreground: oklch(0.09 0 0);
-  --destructive: oklch(0.6 0.2 25);
-  --destructive-foreground: oklch(0.95 0 0);
-  --border: oklch(0.22 0 0);
-  --input: oklch(0.18 0 0);
-  --ring: oklch(0.72 0.19 160);
-  --chart-1: oklch(0.72 0.19 160);
-  --chart-2: oklch(0.65 0.18 250);
-  --chart-3: oklch(0.7 0.16 45);
-  --chart-4: oklch(0.68 0.2 290);
-  --chart-5: oklch(0.75 0.15 200);
-  --radius: 0.75rem;
-  --sidebar: oklch(0.11 0 0);
-  --sidebar-foreground: oklch(0.95 0 0);
-  --sidebar-primary: oklch(0.72 0.19 160);
-  --sidebar-primary-foreground: oklch(0.09 0 0);
-  --sidebar-accent: oklch(0.18 0 0);
-  --sidebar-accent-foreground: oklch(0.95 0 0);
-  --sidebar-border: oklch(0.22 0 0);
-  --sidebar-ring: oklch(0.72 0.19 160);
-  
-  /* Custom layer colors for tech stack */
-  --layer-frontend: oklch(0.72 0.19 160);
-  --layer-storage: oklch(0.65 0.18 250);
-  --layer-policy: oklch(0.7 0.16 45);
-  --layer-backend: oklch(0.68 0.2 290);
-  --layer-database: oklch(0.65 0.15 200);
-  --layer-timeseries: oklch(0.7 0.22 30);
-  --layer-analytics: oklch(0.6 0.18 280);
-  --layer-visualization: oklch(0.72 0.19 160);
-  --layer-infra: oklch(0.55 0.15 220);
-  --layer-auth: oklch(0.65 0.2 320);
+  --background: #f6f2ea;
+  --foreground: #1f1c18;
+  --card: #fffdf8;
+  --card-foreground: #1f1c18;
+  --popover: #fffdf8;
+  --popover-foreground: #1f1c18;
+  --primary: #a4482a;
+  --primary-foreground: #fffdf8;
+  --secondary: #ede6d9;
+  --secondary-foreground: #1f1c18;
+  --muted: #ede6d9;
+  --muted-foreground: #675f54;
+  --accent: #ede6d9;
+  --accent-foreground: #1f1c18;
+  --destructive: #b3261e;
+  --destructive-foreground: #fffdf8;
+  --border: #e0d8c9;
+  --input: #d9d0bf;
+  --ring: #a4482a;
+  --radius: 0.625rem;
+
+  /* Data-viz & status (light-surface steps of the validated palette).
+     Diverging pair for ROI polarity; status colours are reserved for
+     verdicts and always ship with an icon + label. */
+  --viz-positive: #2a78d6;
+  --viz-negative: #e34948;
+  --viz-neutral: #f0efec;
+  --status-good: #0ca30c;
+  --status-warning: #d48f00;
+  --status-critical: #d03b3b;
+}
+
+/* Terminal surfaces (ingest console, raw JSON) stay dark: scoped token
+   overrides so utilities like text-foreground stay legible inside. */
+.terminal {
+  --foreground: #ece7de;
+  --muted-foreground: #a39b8f;
+  --border: #34302a;
+  --secondary: #2a2621;
+  background: #171512;
+  color: var(--foreground);
 }
 
 @theme inline {
-  --font-sans: 'Geist', 'Geist Fallback';
-  --font-mono: 'Geist Mono', 'Geist Mono Fallback';
+  --font-sans: var(--font-plex-sans), ui-sans-serif, system-ui, sans-serif;
+  --font-mono: var(--font-plex-mono), ui-monospace, monospace;
+  --font-serif: var(--font-source-serif), ui-serif, Georgia, serif;
   --color-background: var(--background);
   --color-foreground: var(--foreground);
   --color-card: var(--card);
@@ -74,35 +72,16 @@
   --color-border: var(--border);
   --color-input: var(--input);
   --color-ring: var(--ring);
-  --color-chart-1: var(--chart-1);
-  --color-chart-2: var(--chart-2);
-  --color-chart-3: var(--chart-3);
-  --color-chart-4: var(--chart-4);
-  --color-chart-5: var(--chart-5);
   --radius-sm: calc(var(--radius) - 4px);
   --radius-md: calc(var(--radius) - 2px);
   --radius-lg: var(--radius);
   --radius-xl: calc(var(--radius) + 4px);
-  --color-sidebar: var(--sidebar);
-  --color-sidebar-foreground: var(--sidebar-foreground);
-  --color-sidebar-primary: var(--sidebar-primary);
-  --color-sidebar-primary-foreground: var(--sidebar-primary-foreground);
-  --color-sidebar-accent: var(--sidebar-accent);
-  --color-sidebar-accent-foreground: var(--sidebar-accent-foreground);
-  --color-sidebar-border: var(--sidebar-border);
-  --color-sidebar-ring: var(--sidebar-ring);
-  
-  /* Layer colors for tech stack visualization */
-  --color-layer-frontend: var(--layer-frontend);
-  --color-layer-storage: var(--layer-storage);
-  --color-layer-policy: var(--layer-policy);
-  --color-layer-backend: var(--layer-backend);
-  --color-layer-database: var(--layer-database);
-  --color-layer-timeseries: var(--layer-timeseries);
-  --color-layer-analytics: var(--layer-analytics);
-  --color-layer-visualization: var(--layer-visualization);
-  --color-layer-infra: var(--layer-infra);
-  --color-layer-auth: var(--layer-auth);
+  --color-viz-positive: var(--viz-positive);
+  --color-viz-negative: var(--viz-negative);
+  --color-viz-neutral: var(--viz-neutral);
+  --color-status-good: var(--status-good);
+  --color-status-warning: var(--status-warning);
+  --color-status-critical: var(--status-critical);
 }
 
 @layer base {
@@ -112,24 +91,25 @@
   body {
     @apply bg-background text-foreground;
   }
+  h1,
+  h2 {
+    font-family: var(--font-serif);
+    letter-spacing: -0.01em;
+  }
+  h1 {
+    font-weight: 600;
+  }
+  h2 {
+    font-weight: 600;
+  }
 }
 
-/* Data-viz & status tokens (dark surface). Diverging pair for ROI polarity;
-   status colours are reserved for verdicts and always ship with icon + label. */
-:root {
-  --viz-positive: #3987e5;
-  --viz-negative: #e66767;
-  --viz-neutral: #383835;
-  --status-good: #0ca30c;
-  --status-warning: #fab219;
-  --status-critical: #d03b3b;
-}
-
-@theme inline {
-  --color-viz-positive: var(--viz-positive);
-  --color-viz-negative: var(--viz-negative);
-  --color-viz-neutral: var(--viz-neutral);
-  --color-status-good: var(--status-good);
-  --color-status-warning: var(--status-warning);
-  --color-status-critical: var(--status-critical);
+@layer components {
+  /* Cards sit on the paper with a soft, warm shadow rather than a hard edge. */
+  .bg-card {
+    box-shadow: 0 1px 2px rgb(70 50 20 / 0.05), 0 2px 8px -2px rgb(70 50 20 / 0.06);
+  }
+  .terminal .bg-card {
+    box-shadow: none;
+  }
 }

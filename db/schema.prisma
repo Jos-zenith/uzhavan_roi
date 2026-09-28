@@ -59,6 +59,22 @@ model Feature {
 
   kpis  FeatureKpi[]
   costs CostEntry[]
+  notes ReviewNote[]
+}
+
+/// The feature's review log: who said what, when. Decisions are recorded here
+/// too, so the reasoning behind "scale" or "retire" outlives the meeting.
+model ReviewNote {
+  id        String   @id @default(cuid())
+  featureId String
+  author    String
+  kind      String // NOTE | DECISION | SYSTEM
+  body      String
+  createdAt DateTime @default(now())
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@index([featureId, createdAt])
 }
 
 /// A KPI a feature commits to moving, with its baseline, target and the
@@ -91,10 +107,13 @@ model CostEntry {
 }
 
 /// The common event schema. Not a foreign key to Feature on purpose: events
-/// for unregistered flags are still stored and surfaced as a governance gap.
+/// for unregistered flags are kept but quarantined — excluded from every
+/// analytics query — and released when a spec with that flag is registered.
 model Event {
-  id          String   @id @default(cuid())
-  eventId     String   @unique // client-generated, for idempotent retries
+  id            String   @id @default(cuid())
+  eventId       String   @unique // client-generated, for idempotent retries
+  schemaVersion Int      @default(1)
+  quarantined   Boolean  @default(false)
   timestamp   DateTime
   receivedAt  DateTime @default(now())
   app         String
@@ -109,4 +128,5 @@ model Event {
 
   @@index([featureFlag, action])
   @@index([action, timestamp])
+  @@index([quarantined, featureFlag])
 }

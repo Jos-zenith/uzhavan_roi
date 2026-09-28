@@ -1,3 +1,4 @@
+import Link from "next/link"
 import { ArrowDown, ArrowRight } from "lucide-react"
 
 const STAGES = [
@@ -29,32 +30,21 @@ const STAGES = [
 
 const PIPELINE = [
   { title: "Product code", body: "Shared SDK: expose(), track(). Batching, retries, stable variant assignment." },
-  { title: "Ingest API", body: "POST /api/events. Rejects anything off-schema; idempotent on eventId." },
+  { title: "Ingest API", body: "POST /api/events. Enforces the versioned contract, de-duplicates on eventId, quarantines unregistered flags." },
   { title: "Warehouse", body: "Event table keyed by feature flag + release. Reference tables: Feature, KpiDefinition, CostEntry." },
   { title: "ROI layer", body: "Splits arms, computes catalogue KPIs, tests significance, monetises, applies ROI formula." },
   { title: "Decisions", body: "Portfolio dashboard, release gates, governance gaps, recorded verdicts." },
-]
-
-const SCHEMA = [
-  ["eventId", "Client-generated UUID; retries are de-duplicated"],
-  ["timestamp", "When the action happened (ISO 8601)"],
-  ["app · release", "Which product and version emitted it"],
-  ["userId · sessionId", "Who, and in which session"],
-  ["featureFlag · variant", "Which feature, and control or treatment"],
-  ["action", "snake_case verb the KPI catalogue refers to"],
-  ["value", "Optional number, e.g. seconds taken"],
-  ["context", "Flat key/value extras (district, crop…)"],
 ]
 
 export default function PlaybookPage() {
   return (
     <div className="space-y-12">
       <div className="max-w-2xl space-y-2">
-        <h1 className="text-3xl font-bold">The playbook</h1>
+        <h1 className="text-2xl font-bold">The playbook</h1>
         <p className="text-muted-foreground">
-          Features used to ship with ad-hoc metrics or none, so arguments about their value were political. This is
-          the standard process and telemetry architecture that makes every feature&apos;s ROI traceable, and the app
-          enforces each step.
+          When every team tracks different numbers, or none, &ldquo;was it worth it?&rdquo; gets settled by whoever
+          argues best. These are the rules this tool enforces instead. None of them is optional: each one is a gate
+          check or a query filter in the code, not a guideline.
         </p>
       </div>
 
@@ -94,16 +84,16 @@ export default function PlaybookPage() {
       <div className="grid gap-6 lg:grid-cols-2">
         <section className="space-y-3 rounded-xl border border-border bg-card p-6">
           <h2 className="text-lg font-semibold">Common event schema</h2>
-          <table className="w-full text-sm">
-            <tbody>
-              {SCHEMA.map(([field, desc]) => (
-                <tr key={field} className="border-t border-border first:border-0">
-                  <td className="py-2 pr-4 font-mono text-xs">{field}</td>
-                  <td className="py-2 text-muted-foreground">{desc}</td>
-                </tr>
-              ))}
-            </tbody>
-          </table>
+          <p className="text-sm text-muted-foreground">
+            One versioned contract (user, session, feature flag, variant, action, value, context) shared by the SDK,
+            the ingest API and analytics. The field reference is generated from the validator itself and published on
+            the <Link href="/kpis" className="text-primary hover:underline">KPI catalogue</Link> and at{" "}
+            <a href="/api/schema" className="font-mono text-xs text-primary hover:underline">/api/schema</a>.
+          </p>
+          <p className="text-sm text-muted-foreground">
+            Events for a flag with no registered spec are <strong className="text-foreground">quarantined</strong>:
+            they're kept, but excluded from every KPI, until the spec is registered and they're released.
+          </p>
         </section>
 
         <section className="space-y-4 rounded-xl border border-border bg-card p-6">
@@ -130,6 +120,40 @@ export default function PlaybookPage() {
           </ul>
         </section>
       </div>
+
+      <section className="space-y-4">
+        <h2 className="text-lg font-semibold">What this doesn&apos;t do yet</h2>
+        <p className="max-w-2xl text-sm text-muted-foreground">
+          Known limits, written down so nobody over-trusts a number:
+        </p>
+        <ul className="grid gap-3 text-sm sm:grid-cols-2">
+          {LIMITS.map(([title, body]) => (
+            <li key={title} className="rounded-xl border border-border bg-card p-4">
+              <h3 className="mb-1 font-medium">{title}</h3>
+              <p className="text-muted-foreground">{body}</p>
+            </li>
+          ))}
+        </ul>
+      </section>
     </div>
   )
 }
+
+const LIMITS: [string, string][] = [
+  [
+    "Several KPIs, one threshold",
+    "Each KPI is tested at p < 0.05 separately. With 2–3 KPIs per feature, the chance that at least one false win slips through is higher than 5%. The fix is a Holm correction; it isn't in yet.",
+  ],
+  [
+    "Pre/post can't see seasons",
+    "Mandi price alerts has no holdout, so a harvest-season lift and a feature lift look the same. The spec form steers teams to A/B tests or phased rollouts for this reason.",
+  ],
+  [
+    "₹ values are estimates",
+    "“₹120 per extra conversion” comes from the spec author and analytics sign-off, not from finance. ROI is only as honest as those inputs, which is why they're visible on every feature page.",
+  ],
+  [
+    "Sign-off is a button, not an identity",
+    "There are no user accounts yet, so an approval records the role, not the person. Real use would put these behind SSO.",
+  ],
+]

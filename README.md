@@ -1,4 +1,4 @@
-# Feature ROI: TN IMPACT 26 (TNI26073)
+# Impact Ledger: feature ROI for TN IMPACT 26 (TNI26073)
 
 **Problem.** Features ship with ad-hoc or missing metrics, so nobody can prove whether they drive revenue, cut
 cost or improve experience, and investment decisions become political.
@@ -32,8 +32,10 @@ elsewhere.
 4. **Tamil voice search**: early numbers look good, but only 18 of 28 days have elapsed. Verdict: **keep measuring**. This shows that a good-looking early number doesn't get to count yet.
 5. **Offline scheme applications**: click *Move to Shipped* and the server refuses, because `error_shown` was never instrumented.
 6. **Bulk mandi booking**: a draft spec blocked by missing approvals and missing monetisation.
-7. **Live demo** (`/demo`): place an order in the mock app and watch the SDK's events go into the same pipeline.
-8. **Governance gaps**: the `dark_mode` flag is sending events but has no spec or owner.
+7. **Live demo** (`/demo`): place an order in the mock app. The ingest console shows each queued event and the API's actual response. Then use *Break it on purpose* to send an unregistered flag (quarantined), a typo'd field (rejected), a future schema version (rejected) and a replayed batch (de-duplicated).
+   - On any feature page, the **Review log** shows the owner's notes, recorded decisions, and every gate outcome, including refusals. `{ }` buttons show the raw JSON behind a screen, and each KPI shows the formula and test used.
+8. **Governance gaps**: the `dark_mode` flag has sent 40 events with no spec or owner. They're **quarantined**: kept, but excluded from every KPI. Click *Register a spec*; the form opens pre-filled and says how many events are waiting. Submit it, and the feature page confirms the events were released. The new spec still starts as a draft that needs sign-off.
+9. **KPI catalogue → Event contract**: the versioned event schema, generated from the same validator the ingest API enforces (also at `/api/schema`). Send `schemaVersion: 2` or a typo like `feature_flag` and ingest rejects it with a precise error. Leave `schemaVersion` out, as an older SDK would, and the event is accepted as v1.
 
 ## Architecture
 
@@ -50,6 +52,8 @@ product code ──SDK──▶ POST /api/events ──▶ Event warehouse ─�
 | `lib/analytics/report.ts` | ROI calculation layer |
 | `lib/analytics/stats.ts` | Two-proportion and Welch tests |
 | `lib/governance.ts` | Spec, development and release gates |
+| `lib/registry.ts` | Event registry: quarantine for unregistered flags, released when a spec is registered |
+| `lib/telemetry/version.ts` | Event contract version, and the versions ingest accepts |
 | `db/schema.prisma` | Data model |
 | `db/seed.ts` | Six demo features with known true effects |
 

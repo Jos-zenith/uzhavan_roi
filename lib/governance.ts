@@ -1,6 +1,7 @@
 import { db } from "@/lib/db"
 import { parseGoals, type FeatureStatus } from "@/lib/domain"
 import type { FeatureWithSpec } from "@/lib/analytics/report"
+import { ADMITTED } from "@/lib/registry"
 
 /**
  * Release gates. A feature only moves forward when every check for its next
@@ -56,7 +57,7 @@ export async function instrumentationStatus(f: FeatureWithSpec) {
   const actions = requiredActions(f)
   const grouped = await db.event.groupBy({
     by: ["action"],
-    where: { featureFlag: f.key, action: { in: actions } },
+    where: { ...ADMITTED, featureFlag: f.key, action: { in: actions } },
     _count: { _all: true },
     _max: { timestamp: true },
   })
@@ -65,6 +66,7 @@ export async function instrumentationStatus(f: FeatureWithSpec) {
   if (f.attributionMethod === "PRE_POST") {
     baselineEvents = await db.event.count({
       where: {
+        ...ADMITTED,
         featureFlag: null,
         action: { in: actions.filter((a) => a !== "feature_exposed") },
         ...(f.releasedAt ? { timestamp: { lt: f.releasedAt } } : {}),
@@ -79,6 +81,25 @@ export async function instrumentationStatus(f: FeatureWithSpec) {
     })),
     baselineEvents,
   }
+}
+
+export type ReviewStatus =
+  | { kind: "DECIDED"; decision: string; at: Date }
+  | { kind: "DUE"; at: Date } // window still open; review on this date
+  | { kind: "OVERDUE"; since: Date; days: number } // results credible, nobody has decided
+  | { kind: "NEEDS_SAMPLE"; since: Date } // window closed, but an arm is below minimum sample
+  | { kind: "NONE" }
+
+const DAY_MS = 86_400_000
+
+/** Where a shipped feature stands in portfolio review, from its observation window. */
+export function reviewStatus(f: FeatureWithSpec, credible: boolean, now = new Date()): ReviewStatus {
+  if (f.decision && f.decidedAt) return { kind: "DECIDED", decision: f.decision, at: f.decidedAt }
+  if (f.status !== "SHIPPED" || !f.releasedAt) return { kind: "NONE" }
+  const windowCloses = new Date(f.releasedAt.getTime() + f.observationDays * DAY_MS)
+  if (now < windowCloses) return { kind: "DUE", at: windowCloses }
+  if (!credible) return { kind: "NEEDS_SAMPLE", since: windowCloses }
+  return { kind: "OVERDUE", since: windowCloses, days: Math.floor((now.getTime() - windowCloses.getTime()) / DAY_MS) }
 }
 
 export async function gateFor(f: FeatureWithSpec): Promise<Gate> {

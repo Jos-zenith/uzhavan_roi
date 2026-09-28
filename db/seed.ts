@@ -87,6 +87,7 @@ const DISTRICTS = ["Thanjavur", "Madurai", "Coimbatore", "Tiruchirappalli", "Sal
 
 async function main() {
   await db.event.deleteMany()
+  await db.reviewNote.deleteMany()
   await db.costEntry.deleteMany()
   await db.featureKpi.deleteMany()
   await db.feature.deleteMany()
@@ -124,6 +125,9 @@ async function main() {
         attributionMethod: "AB_TEST", segment: "Returning buyers with ≥1 past order, all districts, 50/50 split",
         minSamplePerArm: 400, observationDays: 28, status: "SHIPPED", releaseVersion: "4.2.0", releasedAt: new Date(released),
         qualitativeBenefits: "Farmers in field interviews describe reordering as 'finally simple'.",
+        decision: "SCALE",
+        decisionNote: "Both KPIs beat target with p < 0.001. Roll out to 100% of returning buyers in 4.3.",
+        decidedAt: new Date(NOW - 10 * DAY),
         ...approved,
         kpis: {
           create: [
@@ -169,6 +173,9 @@ async function main() {
         goals: goals(["REVENUE", "Sell more listed produce through the app"]),
         attributionMethod: "PRE_POST", segment: "All farmers with an active produce listing (no holdout possible — alerts are district-wide)",
         minSamplePerArm: 500, observationDays: 28, status: "SHIPPED", releaseVersion: "4.1.0", releasedAt: new Date(released),
+        decision: "ITERATE",
+        decisionNote: "Keep it on, no new investment. Re-measure with a district-staggered rollout next season to separate the feature from the harvest.",
+        decidedAt: new Date(NOW - 3 * DAY),
         ...approved,
         kpis: { create: [{ kpiId: kpi.produce_sale_rate, baseline: 0.3, targetDelta: 0.05, monthlyVolume: 15000, valuePerUnit: 35 }] },
         costs: {
@@ -311,13 +318,57 @@ async function main() {
     },
   })
 
+  // ── Review logs ────────────────────────────────────────────────────────
+  // Figures quoted here match what the ROI layer computes from this seed.
+  // Anything beyond the telemetry is framed as a hypothesis, not a finding.
+  const ids = Object.fromEntries((await db.feature.findMany({ select: { key: true, id: true } })).map((f) => [f.key, f.id]))
+  const log: [string, number, string, "NOTE" | "DECISION" | "SYSTEM", string][] = [
+    ["one_tap_reorder", 42, "Release gate", "SYSTEM", "Gate passed (3/3 checks): In development → Shipped in 4.2.0."],
+    ["one_tap_reorder", 40, "Kavya R. (Marketplace PM)", "NOTE", "Scope reminder: the test only covers returning buyers. First-time buyers have no past order to reorder, so don't extrapolate this result to them."],
+    ["one_tap_reorder", 12, "Kavya R. (Marketplace PM)", "NOTE", "Window closed at day 28 and both arms are well past 400 users. Conversion +6.5 pp and checkout 27s faster, both p < 0.001, and both beat target. Proposing we scale to 100% in 4.3."],
+
+    ["one_tap_reorder", 10, "Portfolio review", "DECISION", "Scale. Both KPIs beat target with p < 0.001. Roll out to 100% of returning buyers in 4.3."],
+
+    ["mandi_price_alerts", 35, "Release gate", "SYSTEM", "Gate passed (4/4 checks): In development → Shipped in 4.1.0."],
+    ["mandi_price_alerts", 34, "Arun S. (Market Linkage PM)", "NOTE", "No holdout possible: alerts go to a whole district at once, so this is pre/post. Treat the result as an upper bound."],
+    ["mandi_price_alerts", 5, "Arun S. (Market Linkage PM)", "NOTE", "Sale rate +5.7 pp, above the 5 pp target, but the post window overlaps the start of the kuruvai harvest. Some of that lift may be seasonal and this design can't separate it. ROI is positive but thin (~17%). Before we invest more: run a district-level staggered rollout for the next season to get a real comparison."],
+
+    ["mandi_price_alerts", 3, "Portfolio review", "DECISION", "Iterate. Keep it on, no new investment. Re-measure with a district-staggered rollout next season to separate the feature from the harvest."],
+
+    ["ai_crop_advisor", 60, "Release gate", "SYSTEM", "Gate passed (5/5 checks): In development → Shipped in 4.0.0."],
+    ["ai_crop_advisor", 45, "Meena P. (Agronomy PM)", "NOTE", "Two weeks in: acceptance looks flat and support tickets are running higher in treatment. Too early to call; leaving it on."],
+    ["ai_crop_advisor", 25, "Meena P. (Agronomy PM)", "NOTE", "Window closed. Acceptance didn't move (p = 0.66). Tickets went from 10.8 to 28.3 per 1,000 users (p = 0.002), so the feature is creating support load, not removing it. With ₹70k/month to run, every month on costs money twice."],
+    ["ai_crop_advisor", 24, "Meena P. (Agronomy PM)", "NOTE", "Recommending retire at the next portfolio review. Open question for any v2, not answered by this data: are the tickets about wrong advice, or about advice farmers couldn't act on? We should sample the tickets before building anything else here."],
+
+    ["tamil_voice_search", 18, "Release gate", "SYSTEM", "Gate passed (5/5 checks): In development → Shipped in 4.3.0."],
+    ["tamil_voice_search", 1, "Karthik V. (Discovery PM)", "NOTE", "Day 17 of 28. Search success is up ~7 pp in the 20% cohort; ticket rate hasn't moved. The ROI reads −80% because only the search lift is proven so far (about ₹17k/month) against ₹10 lakh of build and run cost; the ticket saving isn't proven. Holding at 20%, and not expanding to 50% until the window closes. Early lifts in phased rollouts often shrink."],
+
+    ["offline_forms", 20, "Release gate", "SYSTEM", "Gate passed (1/1 checks): Spec approved → In development."],
+    ["offline_forms", 1, "Release gate", "SYSTEM", "Gate refused: In development → Shipped. Failing: Event error_shown received with flag offline_forms; Event session_started received with flag offline_forms."],
+    ["offline_forms", 1, "Divya K. (Schemes PM)", "NOTE", "Fair refusal. The staging build only sends feature_exposed and form_submitted. Without error_shown we couldn't measure the risk goal at all. Ship date moves until both events are wired."],
+
+    ["bulk_mandi_booking", 6, "Arun S. (Market Linkage PM)", "NOTE", "Spec is incomplete on purpose: no monthly volume until the market committee shares FPO registration numbers, so there's nothing honest to put in the ROI model yet. Analytics won't sign off without it, which is the right call."],
+  ]
+  await db.reviewNote.createMany({
+    data: log.map(([key, daysAgo, author, kind, body]) => ({
+      featureId: ids[key],
+      author,
+      kind,
+      body,
+      createdAt: new Date(NOW - daysAgo * DAY + 9.5 * 3_600_000 * rand()),
+    })),
+  })
+
   // ── Events for a flag nobody registered (a governance gap) ─────────────
   for (let i = 0; i < 40; i++) {
     emit(user("dm", i), NOW - 10 * DAY, NOW, "dark_mode", "treatment", [{ action: "feature_exposed", afterSec: 0 }], "4.3.0")
   }
 
-  for (let i = 0; i < events.length; i += 2000) {
-    await db.event.createMany({ data: events.slice(i, i + 2000) })
+  // The seed bypasses the ingest API, so apply its registry rule here too.
+  const registered = new Set((await db.feature.findMany({ select: { key: true } })).map((f) => f.key))
+  const rows = events.map((e) => ({ ...e, receivedAt: e.timestamp, quarantined: !!e.featureFlag && !registered.has(e.featureFlag) }))
+  for (let i = 0; i < rows.length; i += 2000) {
+    await db.event.createMany({ data: rows.slice(i, i + 2000) })
   }
   console.log(`Seeded ${kpiRows.length} KPIs, 6 features, ${events.length} events.`)
 }

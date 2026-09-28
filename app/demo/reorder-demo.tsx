@@ -4,8 +4,10 @@ import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
 import { Check, RotateCcw, Zap } from "lucide-react"
 import { Button } from "@/components/ui/button"
-import { assignVariant, createTelemetry, newId, type Telemetry, type Variant } from "@/lib/telemetry/sdk"
+import { assignVariant, createTelemetry, newId, type FlushResult, type Telemetry, type Variant } from "@/lib/telemetry/sdk"
 import type { TelemetryEvent } from "@/lib/telemetry/schema"
+import { EVENT_SCHEMA_VERSION } from "@/lib/telemetry/version"
+import { cn } from "@/lib/utils"
 
 const FLAG = "one_tap_reorder"
 const STORAGE_KEY = "tnimpact-demo-user"
@@ -15,6 +17,11 @@ const CART = [
   { item: "Potash (MOP)", qty: "1 bag", price: 1700 },
 ]
 const STEPS = ["Review items", "Delivery slot", "Payment"] as const
+
+type Line =
+  | { id: string; at: Date; kind: "queued"; event: TelemetryEvent }
+  | { id: string; at: Date; kind: "response"; label: string; status: number | null; summary: string; ms: number }
+  | { id: string; at: Date; kind: "info"; text: string }
 
 function loadUser(): string {
   try {
@@ -31,15 +38,43 @@ function freshUser(): string {
   return id
 }
 
+/** One line summarising what the ingest API actually said. */
+function summarise(status: number | null, body: unknown): string {
+  if (status === null) return `network error: ${String(body)}`
+  const b = (body ?? {}) as Record<string, unknown>
+  if (status >= 400) {
+    type Issue = { code?: string; path?: unknown[]; message?: string }
+    const issues = (Array.isArray(b.issues) ? b.issues : []) as Issue[]
+    // An unknown key is usually the root cause (a typo), so show it first.
+    const issue = issues.find((i) => i.code === "unrecognized_keys") ?? issues[0]
+    const where = issue?.path?.slice(2).join(".")
+    const more = issues.length > 1 ? ` (+${issues.length - 1} more)` : ""
+    return `${b.error ?? "rejected"}${issue ? ` · ${where ? `${where}: ` : ""}${issue.message}${more}` : ""}`
+  }
+  const q = Array.isArray(b.quarantinedFlags) && b.quarantinedFlags.length ? ` (${b.quarantinedFlags.join(", ")})` : ""
+  return `accepted ${b.accepted} · quarantined ${b.quarantined}${q} · duplicates ${b.duplicates}`
+}
+
+const time = (d: Date) => d.toTimeString().slice(0, 8)
+
 export function ReorderDemo() {
   const telemetry = useRef<Telemetry | null>(null)
   const startedAt = useRef<number>(0)
   const booted = useRef(false)
+  const pending = useRef<TelemetryEvent[]>([])
+  const lastBatch = useRef<TelemetryEvent[]>([])
+  const consoleBox = useRef<HTMLDivElement | null>(null)
   const [userId, setUserId] = useState<string | null>(null)
   const [variant, setVariant] = useState<Variant | null>(null)
-  const [log, setLog] = useState<TelemetryEvent[]>([])
+  const [lines, setLines] = useState<Line[]>([])
   const [step, setStep] = useState<number | null>(null) // null = not started; STEPS.length = done
-  const [flushState, setFlushState] = useState<string>("")
+
+  const push = (line: Line) => setLines((l) => [...l, line].slice(-200))
+
+  function onFlush(r: FlushResult) {
+    lastBatch.current = pending.current.splice(0, r.events)
+    push({ id: newId(), at: new Date(), kind: "response", label: `POST /api/events (${r.events})`, status: r.status, summary: summarise(r.status, r.body), ms: r.ms })
+  }
 
   function startSession(id: string) {
     const t =
@@ -49,12 +84,18 @@ export function ReorderDemo() {
         app: "uzhavan",
         release: "4.2.0",
         flushIntervalMs: 1500,
-        onEvent: (e) => setLog((l) => [e, ...l].slice(0, 30)),
+        onEvent: (e) => {
+          pending.current.push(e)
+          push({ id: e.eventId, at: new Date(), kind: "queued", event: e })
+        },
+        onFlush,
       })
     telemetry.current = t
     t.newSession()
     t.identify(id)
-    const v = t.expose(FLAG, assignVariant(FLAG, id, 50))
+    const assigned = assignVariant(FLAG, id, 50)
+    push({ id: newId(), at: new Date(), kind: "info", text: `session for ${id} · assigned ${assigned} (hash of flag + user, 50/50)` })
+    const v = t.expose(FLAG, assigned)
     t.track("session_started", { feature: FLAG })
     setUserId(id)
     setVariant(v)
@@ -69,6 +110,11 @@ export function ReorderDemo() {
     // eslint-disable-next-line react-hooks/exhaustive-deps
   }, [])
 
+  useEffect(() => {
+    const box = consoleBox.current
+    if (box) box.scrollTop = box.scrollHeight
+  }, [lines])
+
   function beginCheckout() {
     startedAt.current = performance.now()
     telemetry.current?.track("checkout_started", { feature: FLAG, context: { items: CART.length } })
@@ -79,121 +125,218 @@ export function ReorderDemo() {
     const seconds = Math.max(1, Math.round((performance.now() - startedAt.current) / 1000))
     telemetry.current?.track("checkout_completed", { feature: FLAG, value: seconds })
     setStep(STEPS.length)
-    setFlushState("sending…")
     await telemetry.current?.flush()
-    setFlushState("delivered to /api/events")
   }
+
+  /** Bypass the SDK and send a hand-built payload, to show what ingest does with bad input. */
+  async function inject(label: string, events: unknown[]) {
+    const started = Date.now()
+    try {
+      const res = await fetch("/api/events", {
+        method: "POST",
+        headers: { "Content-Type": "application/json" },
+        body: JSON.stringify({ events }),
+      })
+      const body = await res.json().catch(() => null)
+      push({ id: newId(), at: new Date(), kind: "response", label, status: res.status, summary: summarise(res.status, body), ms: Date.now() - started })
+    } catch (err) {
+      push({ id: newId(), at: new Date(), kind: "response", label, status: null, summary: summarise(null, err), ms: Date.now() - started })
+    }
+  }
+
+  const base = () => ({
+    schemaVersion: EVENT_SCHEMA_VERSION,
+    eventId: newId(),
+    timestamp: new Date().toISOString(),
+    app: "uzhavan",
+    release: "4.2.0",
+    userId: userId ?? "demo",
+    sessionId: "fault-injection",
+    featureFlag: FLAG as string | null,
+    variant: null,
+    action: "feature_exposed",
+    value: null,
+    context: {},
+  })
 
   const total = CART.reduce((a, c) => a + c.price, 0)
 
   return (
-    <div className="grid gap-6 lg:grid-cols-[380px_1fr]">
-      {/* Phone mock */}
-      <div className="mx-auto w-full max-w-[380px] rounded-[2rem] border-4 border-secondary bg-card p-5 shadow-xl">
-        <div className="mb-4 flex items-center justify-between text-xs text-muted-foreground">
-          <span>Uzhavan · Inputs</span>
-          <span className="font-mono">{variant ?? "…"}</span>
+    <div className="space-y-6">
+      <div className="grid gap-6 lg:grid-cols-[360px_1fr]">
+        {/* Phone mock */}
+        <div className="mx-auto w-full max-w-[360px] rounded-[2rem] border-4 border-secondary bg-card p-5 shadow-xl">
+          <div className="mb-4 flex items-center justify-between text-xs text-muted-foreground">
+            <span>Uzhavan · Inputs</span>
+            <span className="font-mono">{variant ?? "…"}</span>
+          </div>
+
+          {step === null && (
+            <div className="space-y-4">
+              <h2 className="text-lg font-semibold">Last season&apos;s order</h2>
+              <ul className="space-y-2 text-sm">
+                {CART.map((c) => (
+                  <li key={c.item} className="flex justify-between gap-2">
+                    <span>
+                      {c.item} <span className="text-muted-foreground">· {c.qty}</span>
+                    </span>
+                    <span className="font-mono tabular-nums">₹{c.price}</span>
+                  </li>
+                ))}
+              </ul>
+              {variant === "treatment" ? (
+                <Button
+                  className="w-full"
+                  onClick={() => {
+                    beginCheckout()
+                    void complete()
+                  }}
+                >
+                  <Zap className="h-4 w-4" /> Reorder in one tap · ₹{total}
+                </Button>
+              ) : (
+                <Button className="w-full" variant="secondary" onClick={beginCheckout}>
+                  Start reorder
+                </Button>
+              )}
+            </div>
+          )}
+
+          {step !== null && step < STEPS.length && (
+            <div className="space-y-4">
+              <ol className="flex gap-1 text-[11px]">
+                {STEPS.map((s, i) => (
+                  <li key={s} className={i <= step ? "flex-1 border-t-2 border-primary pt-1" : "flex-1 border-t-2 border-border pt-1 text-muted-foreground"}>
+                    {s}
+                  </li>
+                ))}
+              </ol>
+              <h2 className="text-lg font-semibold">{STEPS[step]}</h2>
+              <p className="text-sm text-muted-foreground">
+                {step === 0 && "Confirm quantities for each item."}
+                {step === 1 && "Choose a delivery slot at your village collection point."}
+                {step === 2 && `Pay ₹${total} by UPI.`}
+              </p>
+              <div className="flex gap-2">
+                <Button className="flex-1" onClick={() => (step === STEPS.length - 1 ? void complete() : setStep(step + 1))}>
+                  {step === STEPS.length - 1 ? "Place order" : "Continue"}
+                </Button>
+                <Button variant="ghost" onClick={() => setStep(null)}>
+                  Abandon
+                </Button>
+              </div>
+            </div>
+          )}
+
+          {step === STEPS.length && (
+            <div className="space-y-3 py-6 text-center">
+              <Check className="mx-auto h-10 w-10 text-status-good" aria-hidden />
+              <p className="font-semibold">Order placed</p>
+              <Button variant="outline" size="sm" onClick={() => setStep(null)}>
+                Back
+              </Button>
+            </div>
+          )}
         </div>
 
-        {step === null && (
-          <div className="space-y-4">
-            <h2 className="text-lg font-semibold">Last season&apos;s order</h2>
-            <ul className="space-y-2 text-sm">
-              {CART.map((c) => (
-                <li key={c.item} className="flex justify-between">
-                  <span>
-                    {c.item} <span className="text-muted-foreground">· {c.qty}</span>
-                  </span>
-                  <span className="tabular-nums">₹{c.price}</span>
-                </li>
-              ))}
-            </ul>
-            {variant === "treatment" ? (
-              <Button
-                className="w-full"
-                onClick={() => {
-                  beginCheckout()
-                  void complete()
-                }}
-              >
-                <Zap className="h-4 w-4" /> Reorder in one tap · ₹{total}
-              </Button>
-            ) : (
-              <Button className="w-full" variant="secondary" onClick={beginCheckout}>
-                Start reorder
-              </Button>
-            )}
-          </div>
-        )}
-
-        {step !== null && step < STEPS.length && (
-          <div className="space-y-4">
-            <ol className="flex gap-1 text-[11px]">
-              {STEPS.map((s, i) => (
-                <li key={s} className={i <= step ? "flex-1 border-t-2 border-primary pt-1" : "flex-1 border-t-2 border-border pt-1 text-muted-foreground"}>
-                  {s}
-                </li>
-              ))}
-            </ol>
-            <h2 className="text-lg font-semibold">{STEPS[step]}</h2>
-            <p className="text-sm text-muted-foreground">
-              {step === 0 && "Confirm quantities for each item."}
-              {step === 1 && "Choose a delivery slot at your village collection point."}
-              {step === 2 && `Pay ₹${total} by UPI.`}
+        {/* Controls */}
+        <div className="space-y-5 text-sm">
+          <div className="space-y-2">
+            <p className="text-muted-foreground">
+              You are <code className="font-mono text-foreground">{userId}</code>, in the <strong className="text-foreground">{variant}</strong> arm.
+              Control gets the old three-step checkout; treatment gets the one-tap button. The split is a hash of
+              flag + user, so reloading keeps you in the same arm.
             </p>
-            <div className="flex gap-2">
-              <Button className="flex-1" onClick={() => (step === STEPS.length - 1 ? void complete() : setStep(step + 1))}>
-                {step === STEPS.length - 1 ? "Place order" : "Continue"}
+            <div className="flex flex-wrap gap-2">
+              <Button variant="outline" size="sm" onClick={() => startSession(freshUser())}>
+                <RotateCcw className="h-4 w-4" /> Be a different farmer
               </Button>
-              <Button variant="ghost" onClick={() => setStep(null)}>
-                Abandon
+              <Button asChild variant="ghost" size="sm">
+                <Link href={`/features/${FLAG}`}>Open the feature report →</Link>
               </Button>
             </div>
           </div>
-        )}
 
-        {step === STEPS.length && (
-          <div className="space-y-3 py-6 text-center">
-            <Check className="mx-auto h-10 w-10 text-status-good" aria-hidden />
-            <p className="font-semibold">Order placed</p>
-            <Button variant="outline" size="sm" onClick={() => setStep(null)}>
-              Back
-            </Button>
+          <div className="space-y-2">
+            <h2 className="font-semibold">Break it on purpose</h2>
+            <p className="text-muted-foreground">
+              Each button sends a real request to the ingest API. The console shows exactly what came back.
+            </p>
+            <div className="flex flex-wrap gap-2">
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => inject("unregistered flag", [{ ...base(), featureFlag: "voice_checkout_beta", variant: "treatment" }])}
+              >
+                Unregistered flag
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => {
+                  const { featureFlag, ...rest } = base()
+                  void inject("typo: feature_flag", [{ ...rest, feature_flag: featureFlag }])
+                }}
+              >
+                Typo in a field name
+              </Button>
+              <Button variant="outline" size="sm" onClick={() => inject("schemaVersion 2", [{ ...base(), schemaVersion: 2 }])}>
+                Future schema version
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                disabled={lastBatch.current.length === 0}
+                onClick={() => inject(`replay last batch (${lastBatch.current.length})`, lastBatch.current)}
+              >
+                Replay last batch
+              </Button>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              The unregistered flag lands in quarantine and shows up under &ldquo;Needs you&rdquo; on the portfolio.
+            </p>
           </div>
-        )}
+        </div>
       </div>
 
-      {/* Event stream */}
-      <div className="space-y-4">
-        <div className="flex flex-wrap items-center gap-3 text-sm">
-          <span className="text-muted-foreground">
-            User <code className="font-mono text-foreground">{userId}</code> is in the{" "}
-            <strong>{variant}</strong> arm.
-          </span>
-          <Button variant="outline" size="sm" onClick={() => startSession(freshUser())}>
-            <RotateCcw className="h-4 w-4" /> Be a different farmer
-          </Button>
-          <Link href={`/features/${FLAG}`} className="text-primary hover:underline">
-            Open the feature report →
-          </Link>
+      {/* Console */}
+      <div className="overflow-hidden terminal rounded-xl border border-border">
+        <div className="flex items-center justify-between border-b border-border px-4 py-2 font-mono text-xs text-muted-foreground">
+          <span>ingest console · uzhavan@4.2.0 → /api/events</span>
+          <button type="button" className="hover:text-foreground" onClick={() => setLines([])}>
+            clear
+          </button>
         </div>
-        <div className="rounded-xl border border-border bg-card">
-          <div className="flex items-center justify-between border-b border-border px-4 py-2 text-xs text-muted-foreground">
-            <span>Events emitted by the SDK (newest first)</span>
-            <span>{flushState}</span>
-          </div>
-          <ul className="max-h-[460px] divide-y divide-border overflow-y-auto font-mono text-xs">
-            {log.length === 0 && <li className="px-4 py-3 text-muted-foreground">No events yet.</li>}
-            {log.map((e) => (
-              <li key={e.eventId} className="grid grid-cols-[5.5rem_1fr] gap-2 px-4 py-2">
-                <span className="text-muted-foreground">{e.timestamp.slice(11, 19)}</span>
-                <span className="break-all">
-                  <span className="text-primary">{e.action}</span> flag={e.featureFlag} variant={e.variant}
-                  {e.value !== null && ` value=${e.value}`} session={e.sessionId.slice(0, 8)}
+        <div ref={consoleBox} className="max-h-[360px] overflow-y-auto px-4 py-3 font-mono text-xs leading-6" role="log" aria-live="polite">
+          {lines.length === 0 && <div className="text-muted-foreground">waiting for events…</div>}
+          {lines.map((l) => (
+            <div key={l.id} className="grid grid-cols-[4.5rem_1fr] gap-2">
+              <span className="text-muted-foreground">{time(l.at)}</span>
+              {l.kind === "queued" ? (
+                <span className="break-all text-muted-foreground">
+                  <span className="text-foreground">queue</span> {l.event.action}
+                  {l.event.featureFlag && ` flag=${l.event.featureFlag}`}
+                  {l.event.variant && ` variant=${l.event.variant}`}
+                  {l.event.value !== null && ` value=${l.event.value}s`}
                 </span>
-              </li>
-            ))}
-          </ul>
+              ) : l.kind === "info" ? (
+                <span className="text-muted-foreground"># {l.text}</span>
+              ) : (
+                <span className="break-all">
+                  <span
+                    className={cn(
+                      "mr-2 rounded px-1.5 font-semibold",
+                      l.status === null || l.status >= 400 ? "bg-status-critical/20 text-foreground" : "bg-status-good/20 text-foreground",
+                    )}
+                  >
+                    {l.status ?? "ERR"}
+                  </span>
+                  <span className="text-foreground">{l.label}</span>
+                  <span className="text-muted-foreground"> · {l.summary} · {l.ms}ms</span>
+                </span>
+              )}
+            </div>
+          ))}
         </div>
       </div>
     </div>

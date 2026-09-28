@@ -1,15 +1,16 @@
 import React from "react"
 import type { Metadata } from "next"
-import { Geist, Geist_Mono } from "next/font/google"
+import { IBM_Plex_Mono, IBM_Plex_Sans, Source_Serif_4 } from "next/font/google"
 import { AppNav } from "@/components/app-nav"
 import "./globals.css"
 
-const _geist = Geist({ subsets: ["latin"] })
-const _geistMono = Geist_Mono({ subsets: ["latin"] })
+const plexSans = IBM_Plex_Sans({ subsets: ["latin"], weight: ["400", "500", "600"], variable: "--font-plex-sans" })
+const plexMono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], variable: "--font-plex-mono" })
+const serif = Source_Serif_4({ subsets: ["latin"], weight: ["400", "600"], variable: "--font-source-serif" })
 
 export const metadata: Metadata = {
-  title: "Feature ROI — TN IMPACT 26",
-  description: "Standardised KPI process and telemetry architecture for measuring the ROI of every feature.",
+  title: "Impact Ledger · TN IMPACT 26",
+  description: "What every feature cost, what it proved, and what we decided — for the Uzhavan farmer app.",
   icons: {
     icon: [
       { url: "/icon-light-32x32.png", media: "(prefers-color-scheme: light)" },
@@ -22,7 +23,7 @@ export const metadata: Metadata = {
 
 export default function RootLayout({ children }: Readonly<{ children: React.ReactNode }>) {
   return (
-    <html lang="en">
+    <html lang="en" className={`${plexSans.variable} ${plexMono.variable} ${serif.variable}`}>
       <body className="font-sans antialiased">
         <AppNav />
         <main className="mx-auto w-full max-w-6xl px-4 py-8 lg:px-6">{children}</main>

@@ -1,4 +1,5 @@
 import type { TelemetryEvent } from "./schema"
+import { EVENT_SCHEMA_VERSION } from "./version"
 
 /**
  * Shared telemetry SDK. Engineers only call `expose()` when a user sees a
@@ -23,6 +24,17 @@ export type TelemetryConfig = {
   flushIntervalMs?: number
   /** Called with every event as it is queued (handy for debug panels). */
   onEvent?: (event: TelemetryEvent) => void
+  /** Called after every flush attempt with the server's actual response. */
+  onFlush?: (result: FlushResult) => void
+}
+
+export type FlushResult = {
+  events: number
+  /** HTTP status, or null when the request never reached the server. */
+  status: number | null
+  body: unknown
+  ms: number
+  retrying: boolean
 }
 
 export type TrackOptions = {
@@ -65,6 +77,7 @@ export function createTelemetry(config: TelemetryConfig) {
   function enqueue(action: string, opts: TrackOptions = {}) {
     const flag = opts.feature ?? null
     const event: TelemetryEvent = {
+      schemaVersion: EVENT_SCHEMA_VERSION,
       eventId: newId(),
       timestamp: new Date().toISOString(),
       app: config.app,
@@ -91,6 +104,7 @@ export function createTelemetry(config: TelemetryConfig) {
     if (queue.length === 0) return
     const batch = queue
     queue = []
+    const started = Date.now()
     try {
       const res = await fetch(config.endpoint, {
         method: "POST",
@@ -99,9 +113,13 @@ export function createTelemetry(config: TelemetryConfig) {
         keepalive: true,
       })
       // 4xx means the batch is malformed and retrying won't help.
-      if (res.status >= 500) queue = batch.concat(queue)
-    } catch {
+      const retrying = res.status >= 500
+      if (retrying) queue = batch.concat(queue)
+      const body = await res.json().catch(() => null)
+      config.onFlush?.({ events: batch.length, status: res.status, body, ms: Date.now() - started, retrying })
+    } catch (err) {
       queue = batch.concat(queue) // network error: retry on next flush (eventIds dedupe)
+      config.onFlush?.({ events: batch.length, status: null, body: String(err), ms: Date.now() - started, retrying: true })
     }
   }
 

@@ -1,11 +1,20 @@
 import { NextResponse } from "next/server"
 import { z } from "zod"
 import { db } from "@/lib/db"
-import { DECISIONS } from "@/lib/domain"
+import { DECISIONS, STATUS_LABEL, type FeatureStatus } from "@/lib/domain"
 import { buildReport, featureWithSpec } from "@/lib/analytics/report"
 import { gateFor } from "@/lib/governance"
 
 type Ctx = { params: Promise<{ key: string }> }
+
+/** Gate outcomes go in the review log automatically, refusals included. */
+function log(featureId: string, body: string) {
+  return db.reviewNote.create({ data: { featureId, kind: "SYSTEM", author: "Release gate", body } })
+}
+
+function transition(from: string, to: FeatureStatus) {
+  return `${STATUS_LABEL[from as FeatureStatus]} → ${STATUS_LABEL[to]}`
+}
 
 async function load(key: string) {
   return db.feature.findUnique({ where: { key }, ...featureWithSpec })
@@ -21,7 +30,12 @@ export async function GET(_req: Request, { params }: Ctx) {
 const patchInput = z.discriminatedUnion("op", [
   z.object({ op: z.literal("approve"), role: z.enum(["product", "engineering", "analytics"]), approved: z.boolean() }),
   z.object({ op: z.literal("advance"), releaseVersion: z.string().max(32).optional() }),
-  z.object({ op: z.literal("decide"), decision: z.enum(DECISIONS), note: z.string().max(500).default("") }),
+  z.object({
+    op: z.literal("decide"),
+    decision: z.enum(DECISIONS),
+    note: z.string().max(500).default(""),
+    author: z.string().trim().max(80).optional(),
+  }),
 ])
 
 export async function PATCH(req: Request, { params }: Ctx) {
@@ -45,6 +59,10 @@ export async function PATCH(req: Request, { params }: Ctx) {
     if (!gate.next) return NextResponse.json({ error: "No further stage — use a portfolio decision" }, { status: 409 })
     const failing = gate.checks.filter((c) => !c.ok)
     if (failing.length > 0) {
+      await log(
+        feature.id,
+        `Gate refused: ${transition(feature.status, gate.next)}. Failing: ${failing.map((c) => c.label.replaceAll("`", "")).join("; ")}.`,
+      )
       return NextResponse.json({ error: "Release gate not met", failing }, { status: 409 })
     }
     if (gate.next === "SHIPPED" && !body.releaseVersion?.trim()) {
@@ -57,6 +75,9 @@ export async function PATCH(req: Request, { params }: Ctx) {
           ? { status: gate.next, releasedAt: new Date(), releaseVersion: body.releaseVersion!.trim() }
           : { status: gate.next },
     })
+    const n = gate.checks.length
+    const release = gate.next === "SHIPPED" ? ` in ${body.releaseVersion!.trim()}` : ""
+    await log(feature.id, `Gate passed (${n}/${n} checks): ${transition(feature.status, gate.next)}${release}.`)
     return NextResponse.json({ ok: true, status: gate.next })
   }
 
@@ -71,6 +92,13 @@ export async function PATCH(req: Request, { params }: Ctx) {
       decisionNote: body.note,
       decidedAt: new Date(),
       ...(body.decision === "RETIRE" ? { status: "RETIRED" } : {}),
+      notes: {
+        create: {
+          kind: "DECISION",
+          author: body.author || feature.owner,
+          body: `${body.decision.charAt(0)}${body.decision.slice(1).toLowerCase()}.${body.note ? ` ${body.note}` : ""}`,
+        },
+      },
     },
   })
   return NextResponse.json({ ok: true })

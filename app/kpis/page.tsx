@@ -1,5 +1,7 @@
 import { db } from "@/lib/db"
-import { CALCULATION_LABEL, type KpiCalculation } from "@/lib/domain"
+import { kpiFormula } from "@/lib/domain"
+import { KpiIcon, KPI_GROUPS } from "@/components/kpi-icon"
+import { EventContract } from "@/components/event-contract"
 import { KpiForm } from "./kpi-form"
 
 export const dynamic = "force-dynamic"
@@ -12,47 +14,68 @@ export default async function KpiCataloguePage() {
   return (
     <div className="space-y-8">
       <div className="max-w-2xl space-y-2">
-        <h1 className="text-3xl font-bold">KPI catalogue</h1>
+        <h1 className="text-2xl font-bold">KPI catalogue</h1>
         <p className="text-muted-foreground">
-          One organisation-wide definition per KPI. Features can only commit to KPIs listed here, so &ldquo;conversion&rdquo;
-          means the same thing in every team&apos;s report and results are comparable across the portfolio.
+          If two teams compute &ldquo;conversion&rdquo; differently, their ROI numbers can&apos;t be compared, and
+          the one with the friendlier definition wins the budget meeting. So there&apos;s one definition per KPI,
+          and a feature spec can only pick from this list.
         </p>
       </div>
 
-      <div className="overflow-x-auto rounded-xl border border-border">
-        <table className="w-full min-w-[760px] text-sm">
-          <thead className="bg-secondary/50 text-left text-xs uppercase tracking-wide text-muted-foreground">
-            <tr>
-              <th className="px-4 py-3 font-medium">KPI</th>
-              <th className="px-4 py-3 font-medium">Category</th>
-              <th className="px-4 py-3 font-medium">Calculation</th>
-              <th className="px-4 py-3 font-medium">Better</th>
-              <th className="px-4 py-3 text-right font-medium">Used by</th>
-            </tr>
-          </thead>
-          <tbody>
-            {kpis.map((k) => (
-              <tr key={k.id} className="border-t border-border align-top">
-                <td className="px-4 py-3">
-                  <div className="font-medium">{k.name}</div>
-                  <code className="font-mono text-xs text-muted-foreground">{k.key}</code>
-                  <p className="mt-1 max-w-xs text-xs text-muted-foreground">{k.description}</p>
-                </td>
-                <td className="px-4 py-3 capitalize text-muted-foreground">{k.category.toLowerCase()}</td>
-                <td className="px-4 py-3">
-                  <p className="text-xs text-muted-foreground">{CALCULATION_LABEL[k.calculation as KpiCalculation]}</p>
-                  <p className="mt-1 font-mono text-xs">
-                    {k.numeratorAction}
-                    {k.denominatorAction && <> ÷ {k.denominatorAction}</>}
-                  </p>
-                </td>
-                <td className="px-4 py-3">{k.direction === "UP" ? "↑ higher" : "↓ lower"}</td>
-                <td className="px-4 py-3 text-right tabular-nums">{k._count.featureKpis} features</td>
-              </tr>
-            ))}
-          </tbody>
-        </table>
+      <div className="space-y-6">
+        {Object.entries(KPI_GROUPS).map(([category, group]) => {
+          const inGroup = kpis.filter((k) => k.category === category)
+          if (inGroup.length === 0) return null
+          return (
+            <section key={category} className="space-y-2">
+              <div className="flex items-center gap-3">
+                <KpiIcon category={category} />
+                <h2 className="text-lg">
+                  {group.label} <span className="font-sans text-sm font-normal text-muted-foreground">· {group.blurb}</span>
+                </h2>
+              </div>
+              <ul className="divide-y divide-border rounded-xl border border-border bg-card">
+                {inGroup.map((k) => {
+                  const { formula, test } = kpiFormula(k)
+                  return (
+                    <li key={k.id} className="grid gap-2 px-4 py-3 text-sm md:grid-cols-[1.2fr_1.3fr_auto]">
+                      <div>
+                        <div className="font-medium">
+                          {k.name} <span className="text-muted-foreground">{k.direction === "UP" ? "↑ higher is better" : "↓ lower is better"}</span>
+                        </div>
+                        <p className="text-muted-foreground">
+                          {k.description.split("`").map((part, i) => (i % 2 ? <code key={i} className="font-mono text-xs">{part}</code> : part))}
+                        </p>
+                      </div>
+                      <div>
+                        <code className="font-mono text-xs">{formula}</code>
+                        <p className="text-xs text-muted-foreground">
+                          key <code className="font-mono">{k.key}</code> · tested with a {test}
+                        </p>
+                      </div>
+                      <div className="text-xs text-muted-foreground md:text-right">
+                        {k._count.featureKpis === 0
+                          ? "not used yet"
+                          : `used by ${k._count.featureKpis} ${k._count.featureKpis === 1 ? "feature" : "features"}`}
+                      </div>
+                    </li>
+                  )
+                })}
+              </ul>
+            </section>
+          )
+        })}
       </div>
+
+      <section className="rounded-xl border border-border bg-card p-6">
+        <h2 className="mb-1 text-lg font-semibold">Event contract</h2>
+        <p className="mb-4 text-sm text-muted-foreground">
+          Every KPI above is computed from events in this shape: the action names in each formula are the{" "}
+          <code className="font-mono text-xs">action</code> values products send. This is the single source of truth shared by
+          the SDK, the ingest API and analytics.
+        </p>
+        <EventContract />
+      </section>
 
       <section className="rounded-xl border border-border bg-card p-6">
         <h2 className="mb-1 text-lg font-semibold">Propose a KPI</h2>

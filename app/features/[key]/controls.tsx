@@ -37,34 +37,46 @@ export function Approvals({
   editable,
 }: {
   featureKey: string
-  approvals: { product: boolean; engineering: boolean; analytics: boolean }
+  approvals: Record<"product" | "engineering" | "analytics", { ok: boolean; by: string | null }>
   editable: boolean
 }) {
   const { send, pending, error } = useMutation(featureKey)
+  const [name, setName] = useState("")
+  const roles = Object.keys(approvals) as (keyof typeof approvals)[]
   return (
-    <div>
-      <div className="flex flex-wrap gap-2">
-        {(Object.keys(approvals) as (keyof typeof approvals)[]).map((role) => (
-          <button
-            key={role}
-            type="button"
-            disabled={!editable || pending}
-            aria-pressed={approvals[role]}
-            onClick={() => send("", "PATCH", { op: "approve", role, approved: !approvals[role] })}
-            className={cn(
-              "rounded-md border px-3 py-1.5 text-sm capitalize transition-colors disabled:cursor-not-allowed",
-              approvals[role]
-                ? "border-status-good/60 bg-status-good/15 text-foreground"
-                : "border-border text-muted-foreground hover:bg-secondary",
-            )}
-          >
-            {approvals[role] ? "✓ " : ""}
-            {role}
-          </button>
-        ))}
-      </div>
-      {editable && <p className="mt-2 text-xs text-muted-foreground">Click to sign off as each function.</p>}
-      {error && <p className="mt-2 text-sm text-destructive">{error}</p>}
+    <div className="space-y-3">
+      <ul className="space-y-2">
+        {roles.map((role) => {
+          const a = approvals[role]
+          return (
+            <li key={role} className="flex flex-wrap items-center gap-3 text-sm">
+              <span className="w-24 capitalize text-muted-foreground">{role}</span>
+              {a.ok ? (
+                <span className="rounded-md border border-status-good/60 bg-status-good/15 px-2 py-0.5">✓ {a.by ?? "signed"}</span>
+              ) : (
+                <span className="text-muted-foreground">not signed</span>
+              )}
+              {editable && (
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  disabled={pending || name.trim().length < 2}
+                  onClick={() => send("", "PATCH", { op: "approve", role, approved: !a.ok, by: name.trim() })}
+                >
+                  {a.ok ? "Withdraw" : `Sign as ${role}`}
+                </Button>
+              )}
+            </li>
+          )
+        })}
+      </ul>
+      {editable && (
+        <label className="block space-y-1">
+          <span className="text-xs text-muted-foreground">Signing as (goes in the review log)</span>
+          <input className={cn(input, "w-64")} value={name} onChange={(e) => setName(e.target.value)} placeholder="Your name" />
+        </label>
+      )}
+      {error && <p className="text-sm text-destructive">{error}</p>}
     </div>
   )
 }

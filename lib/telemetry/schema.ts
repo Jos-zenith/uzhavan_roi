@@ -1,5 +1,6 @@
 import { z } from "zod/v4"
 import { EVENT_SCHEMA_VERSION, SUPPORTED_SCHEMA_VERSIONS } from "./version"
+import { findPersonalData } from "./privacy"
 
 /**
  * The common event schema every product emits — the data contract between
@@ -46,9 +47,14 @@ export const telemetryEventSchema = z
     context: z
       .record(z.string(), z.union([z.string(), z.number(), z.boolean(), z.null()]))
       .default({})
-      .describe("Flat key/value extras such as district or crop."),
+      .describe("Flat key/value extras such as district or crop. No personal data: see lib/telemetry/privacy.ts."),
   })
   .strict()
+  .superRefine((event, ctx) => {
+    for (const issue of findPersonalData(event)) {
+      ctx.addIssue({ code: "custom", path: issue.path.split("."), message: issue.message })
+    }
+  })
 
 /** What producers send (schemaVersion and context may be omitted). */
 export type TelemetryEventInput = z.input<typeof telemetryEventSchema>

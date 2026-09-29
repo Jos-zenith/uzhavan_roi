@@ -3,7 +3,7 @@
   "version": "0.1.0",
   "private": true,
   "scripts": {
-    "build": "prisma migrate deploy && next build",
+    "build": "prisma migrate deploy && tsx db/seed.ts --if-empty && next build",
     "dev": "next dev",
     "lint": "eslint .",
     "start": "next start",

@@ -8,6 +8,7 @@ import { assignVariant, createTelemetry, newId, type FlushResult, type Telemetry
 import type { TelemetryEvent } from "@/lib/telemetry/schema"
 import { EVENT_SCHEMA_VERSION } from "@/lib/telemetry/version"
 import { cn } from "@/lib/utils"
+import { ReportMirror } from "./report-mirror"
 
 const FLAG = "one_tap_reorder"
 const STORAGE_KEY = "tnimpact-demo-user"
@@ -56,6 +57,7 @@ function summarise(status: number | null, body: unknown): string {
 }
 
 const time = (d: Date) => d.toTimeString().slice(0, 8)
+const kb = (bytes: number) => (bytes < 1024 ? `${bytes} B` : `${(bytes / 1024).toFixed(1)} KB`)
 
 export function ReorderDemo() {
   const telemetry = useRef<Telemetry | null>(null)
@@ -68,12 +70,21 @@ export function ReorderDemo() {
   const [variant, setVariant] = useState<Variant | null>(null)
   const [lines, setLines] = useState<Line[]>([])
   const [step, setStep] = useState<number | null>(null) // null = not started; STEPS.length = done
+  const [accepted, setAccepted] = useState(0) // batches the ingest API accepted
+  const [offline, setOffline] = useState(false)
+  const [consent, setConsent] = useState(true)
 
   const push = (line: Line) => setLines((l) => [...l, line].slice(-200))
 
   function onFlush(r: FlushResult) {
+    if (r.offline) {
+      push({ id: newId(), at: new Date(), kind: "info", text: `offline: ${r.events} events kept on the device (${kb(r.bytes.raw)}), will send on reconnect` })
+      return
+    }
     lastBatch.current = pending.current.splice(0, r.events)
-    push({ id: newId(), at: new Date(), kind: "response", label: `POST /api/events (${r.events})`, status: r.status, summary: summarise(r.status, r.body), ms: r.ms })
+    const size = r.bytes.sent < r.bytes.raw ? ` · ${kb(r.bytes.raw)} → ${kb(r.bytes.sent)} gzip` : ""
+    push({ id: newId(), at: new Date(), kind: "response", label: `POST /api/events (${r.events})`, status: r.status, summary: summarise(r.status, r.body) + size, ms: r.ms })
+    if (r.status === 200) setAccepted((n) => n + 1) // re-read the report
   }
 
   function startSession(id: string) {
@@ -84,12 +95,15 @@ export function ReorderDemo() {
         app: "uzhavan",
         release: "4.2.0",
         flushIntervalMs: 1500,
+        requireConsent: true,
         onEvent: (e) => {
           pending.current.push(e)
           push({ id: e.eventId, at: new Date(), kind: "queued", event: e })
         },
+        onDrop: (action) => push({ id: newId(), at: new Date(), kind: "info", text: `not collected: ${action} (no consent)` }),
         onFlush,
       })
+    if (!telemetry.current) t.setConsent(true) // the demo farmer agreed at onboarding; toggle below to withdraw
     telemetry.current = t
     t.newSession()
     t.identify(id)
@@ -168,10 +182,19 @@ export function ReorderDemo() {
         <div className="mx-auto w-full max-w-[360px] rounded-[2rem] border-4 border-secondary bg-card p-5 shadow-xl">
           <div className="mb-4 flex items-center justify-between text-xs text-muted-foreground">
             <span>Uzhavan · Inputs</span>
-            <span className="font-mono">{variant ?? "…"}</span>
+            <span className="font-mono">{variant ?? "assigning…"}</span>
           </div>
 
-          {step === null && (
+          {/* Until the browser has assigned an arm, show that, not a guess: rendering the
+              control button first would briefly put treatment users in the wrong flow. */}
+          {step === null && !variant && (
+            <div className="space-y-3 py-6 text-center text-sm text-muted-foreground" role="status">
+              <div className="mx-auto h-6 w-6 animate-spin rounded-full border-2 border-border border-t-primary" aria-hidden />
+              Assigning you to a test group…
+            </div>
+          )}
+
+          {step === null && variant && (
             <div className="space-y-4">
               <h2 className="text-lg font-semibold">Last season&apos;s order</h2>
               <ul className="space-y-2 text-sm">
@@ -243,9 +266,16 @@ export function ReorderDemo() {
         <div className="space-y-5 text-sm">
           <div className="space-y-2">
             <p className="text-muted-foreground">
-              You are <code className="font-mono text-foreground">{userId}</code>, in the <strong className="text-foreground">{variant}</strong> arm.
+              {userId && variant ? (
+                <>
+                  You are farmer <code className="font-mono text-foreground">{userId}</code>, in the{" "}
+                  <strong className="text-foreground">{variant}</strong> group.{" "}
+                </>
+              ) : (
+                <>Assigning you a farmer id and a test group… </>
+              )}
               Control gets the old three-step checkout; treatment gets the one-tap button. The split is a hash of
-              flag + user, so reloading keeps you in the same arm.
+              flag + user, so reloading keeps you in the same group.
             </p>
             <div className="flex flex-wrap gap-2">
               <Button variant="outline" size="sm" onClick={() => startSession(freshUser())}>
@@ -256,6 +286,56 @@ export function ReorderDemo() {
               </Button>
             </div>
           </div>
+
+          <div className="space-y-2">
+            <h2 className="font-semibold">Field conditions</h2>
+            <div className="flex flex-wrap gap-x-6 gap-y-2">
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-[var(--primary)]"
+                  checked={offline}
+                  onChange={(e) => {
+                    setOffline(e.target.checked)
+                    telemetry.current?.simulateOffline(e.target.checked)
+                    push({
+                      id: newId(),
+                      at: new Date(),
+                      kind: "info",
+                      text: e.target.checked ? "no signal: events stay on the device" : "signal back: sending what was held",
+                    })
+                  }}
+                />
+                No signal (village without coverage)
+              </label>
+              <label className="flex items-center gap-2">
+                <input
+                  type="checkbox"
+                  className="h-4 w-4 accent-[var(--primary)]"
+                  checked={consent}
+                  onChange={(e) => {
+                    setConsent(e.target.checked)
+                    telemetry.current?.setConsent(e.target.checked)
+                    push({
+                      id: newId(),
+                      at: new Date(),
+                      kind: "info",
+                      text: e.target.checked
+                        ? "consent given: usage is collected again"
+                        : "consent withdrawn: unsent events deleted from the device, nothing new is collected",
+                    })
+                  }}
+                />
+                Farmer consents to usage data
+              </label>
+            </div>
+            <p className="text-xs text-muted-foreground">
+              Go offline, place an order, reload the page if you like, then turn the signal back on. The held events
+              arrive, gzip-compressed.
+            </p>
+          </div>
+
+          <ReportMirror featureKey={FLAG} kpiKey="checkout_conversion" refreshKey={accepted} />
 
           <div className="space-y-2">
             <h2 className="font-semibold">Break it on purpose</h2>
@@ -282,6 +362,13 @@ export function ReorderDemo() {
               </Button>
               <Button variant="outline" size="sm" onClick={() => inject("schemaVersion 2", [{ ...base(), schemaVersion: 2 }])}>
                 Future schema version
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
+                onClick={() => inject("personal data", [{ ...base(), context: { district: "Madurai", phone: "9876543210" } }])}
+              >
+                Farmer&apos;s phone number
               </Button>
               <Button
                 variant="outline"

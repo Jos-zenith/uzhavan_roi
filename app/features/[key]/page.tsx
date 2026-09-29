@@ -1,6 +1,7 @@
+import Link from "next/link"
 import { notFound } from "next/navigation"
 import { db } from "@/lib/db"
-import { buildReport, featureWithSpec, weeklyAdoption, SIGNIFICANCE } from "@/lib/analytics/report"
+import { buildReport, featureWithSpec, weeklyAdoption, SIGNIFICANCE, type FeatureReport } from "@/lib/analytics/report"
 import { gateFor, instrumentationStatus } from "@/lib/governance"
 import {
   ATTRIBUTION_LABEL,
@@ -20,7 +21,7 @@ import { CheckRow, RecommendationBadge, StatusBadge } from "@/components/badges"
 import { AdoptionChart } from "@/components/adoption-chart"
 import { JsonInspector } from "@/components/json-inspector"
 import { KpiIcon } from "@/components/kpi-icon"
-import { featureHeadline, money } from "@/lib/narrative"
+import { featureHeadline, longDate, money } from "@/lib/narrative"
 import { Approvals, AdvanceButton, CostForm, DecisionForm, NoteForm } from "./controls"
 import { cn } from "@/lib/utils"
 
@@ -121,6 +122,7 @@ export default async function FeaturePage({
                 value={report.windowMet ? `${report.observedDays}` : `${report.observedDays} of ${f.observationDays}`}
               />
             </div>
+            <Sensitivity rows={report.sensitivity} breakEven={report.breakEvenFactor} credible={report.credible} />
             <details className="mt-4 text-sm">
               <summary className="cursor-pointer text-muted-foreground hover:text-foreground">How this is calculated</summary>
               <div className="mt-2 space-y-1 font-mono text-xs text-muted-foreground">
@@ -147,6 +149,8 @@ export default async function FeaturePage({
         </section>
       )}
 
+      {live && !report.credible && <Countdown f={f} report={report} />}
+
       {/* KPI results */}
       <section className="space-y-3">
         <h2 className="text-lg font-semibold">What we promised vs what happened</h2>
@@ -159,7 +163,9 @@ export default async function FeaturePage({
                 <th className="px-4 py-3 text-right font-medium">{report.armLabels[0]}</th>
                 <th className="px-4 py-3 text-right font-medium">{report.armLabels[1]}</th>
                 <th className="px-4 py-3 text-right font-medium">Change (95% CI)</th>
-                <th className="px-4 py-3 text-right font-medium">p</th>
+                <th className="px-4 py-3 text-right font-medium" title="Holm-adjusted across this feature's KPIs">
+                  p (Holm)
+                </th>
                 <th className="px-4 py-3 font-medium">Result</th>
                 <th className="px-4 py-3 text-right font-medium">₹ / month</th>
               </tr>
@@ -197,7 +203,15 @@ export default async function FeaturePage({
                         </div>
                       )}
                     </td>
-                    <td className="px-4 py-3 text-right tabular-nums">{k.pValue === null ? "—" : k.pValue < 0.001 ? "<0.001" : k.pValue.toFixed(3)}</td>
+                    <td
+                      className="px-4 py-3 text-right font-mono tabular-nums"
+                      title={k.pValue === null ? undefined : `raw p = ${k.pValue.toFixed(4)}`}
+                    >
+                      {fmtP(k.pAdjusted)}
+                      {k.pValue !== null && k.pAdjusted !== null && k.pAdjusted !== k.pValue && (
+                        <div className="text-xs text-muted-foreground">raw {fmtP(k.pValue)}</div>
+                      )}
+                    </td>
                     <td className="px-4 py-3 text-xs">
                       {!live ? (
                         <span className="text-muted-foreground">not live</span>
@@ -208,7 +222,15 @@ export default async function FeaturePage({
                       ) : k.significant ? (
                         <span>↗ improved, below target</span>
                       ) : (
-                        <span className="text-muted-foreground">no proven change</span>
+                        <span className="text-muted-foreground">
+                          no proven change
+                          {k.power.required !== null && !k.power.reached && (
+                            <span className="block">
+                              underpowered: needs ~{k.power.required.toLocaleString("en-IN")}/arm, has{" "}
+                              {k.power.current.toLocaleString("en-IN")}
+                            </span>
+                          )}
+                        </span>
                       )}
                     </td>
                     <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums">{live ? formatInr(k.monthlyBenefit) : "—"}</td>
@@ -218,6 +240,19 @@ export default async function FeaturePage({
             </tbody>
           </table>
         </div>
+        <MethodNote
+          kpis={report.kpis.map((k) => ({ name: k.name, test: kpiDefs.get(k.key) ? kpiFormula(kpiDefs.get(k.key)!).test : "—" }))}
+          minSample={f.minSamplePerArm}
+          smallestArm={report.kpis.length ? Math.min(...report.kpis.flatMap((k) => [k.control.n, k.treatment.n])) : 0}
+          sampleMet={report.sampleMet}
+          windowDays={f.observationDays}
+          observedDays={report.observedDays}
+          windowMet={report.windowMet}
+          live={live}
+          method={ATTRIBUTION_LABEL[method]}
+          holm={report.kpis.length > 1}
+          srm={report.srm}
+        />
       </section>
 
       <div className="grid gap-6 lg:grid-cols-2">
@@ -245,6 +280,27 @@ export default async function FeaturePage({
             <dd>{f.observationDays} days</dd>
             <dt className="text-muted-foreground">ROI horizon</dt>
             <dd>{f.horizonMonths} months</dd>
+            {f.attributionMethod !== "PRE_POST" && (
+              <>
+                <dt className="text-muted-foreground">Split</dt>
+                <dd>{Math.round(f.treatmentShare * 100)}% treatment</dd>
+              </>
+            )}
+            <dt className="text-muted-foreground">₹ sources</dt>
+            <dd>
+              <ul className="space-y-1">
+                {f.kpis.map((k) => (
+                  <li key={k.id}>
+                    <span className="font-mono text-xs">₹{k.valuePerUnit}</span> per unit of {k.kpi.name.toLowerCase()}:{" "}
+                    {k.valueSource ? (
+                      <span className="text-muted-foreground">{k.valueSource}</span>
+                    ) : (
+                      <span className="text-status-critical">no source given</span>
+                    )}
+                  </li>
+                ))}
+              </ul>
+            </dd>
             {f.qualitativeBenefits && (
               <>
                 <dt className="text-muted-foreground">Qualitative</dt>
@@ -257,7 +313,11 @@ export default async function FeaturePage({
             <Approvals
               featureKey={f.key}
               editable={f.status === "DRAFT"}
-              approvals={{ product: f.productApproved, engineering: f.engineeringApproved, analytics: f.analyticsApproved }}
+              approvals={{
+                product: { ok: f.productApproved, by: f.productApprovedBy },
+                engineering: { ok: f.engineeringApproved, by: f.engineeringApprovedBy },
+                analytics: { ok: f.analyticsApproved, by: f.analyticsApprovedBy },
+              }}
             />
           </div>
         </section>
@@ -390,6 +450,186 @@ export default async function FeaturePage({
           </ol>
         )}
       </section>
+    </div>
+  )
+}
+
+const fmtP = (p: number | null) => (p === null ? "—" : p < 0.001 ? "<0.001" : p.toFixed(3))
+
+const verdictAt = (roi: number | null) => (roi === null ? "—" : roi >= 0.5 ? "scale" : roi >= 0 ? "iterate" : "retire")
+
+/** ROI if the spec's ₹ values are off by half either way, and where it breaks even. */
+function Sensitivity({ rows, breakEven, credible }: { rows: FeatureReport["sensitivity"]; breakEven: number | null; credible: boolean }) {
+  if (rows.every((r) => r.roi === null)) return null
+  const fragile = breakEven !== null && breakEven > 0.8
+  return (
+    <div className="mt-4 rounded-lg bg-background p-3 text-sm">
+      <p className="mb-2 text-xs text-muted-foreground">If the ₹ values in the spec are wrong</p>
+      <div className="grid grid-cols-3 gap-2">
+        {rows.map((r) => (
+          <div key={r.factor} className={cn("rounded-md p-2", r.factor === 1 && "bg-card")}>
+            <div className="text-xs text-muted-foreground">{r.factor === 1 ? "as assumed" : `${r.factor * 100}% of assumed`}</div>
+            <div className="font-mono text-base">{formatPct(r.roi)}</div>
+            {credible && <div className="text-xs text-muted-foreground">would be: {verdictAt(r.roi)}</div>}
+          </div>
+        ))}
+      </div>
+      <p className={cn("mt-2 text-xs", fragile ? "text-foreground" : "text-muted-foreground")}>
+        {breakEven === null
+          ? "No proven value, so no ₹ assumption can make this pay back."
+          : breakEven > 1
+            ? `Would only break even if the ₹ values were ${(breakEven * 100).toFixed(0)}% of what's assumed.`
+            : `Breaks even if the ₹ values are at least ${(breakEven * 100).toFixed(0)}% of what's assumed.${fragile ? " That's fragile: a small misestimate flips the verdict, so check the sources below." : " Robust to a large misestimate."}`}
+      </p>
+    </div>
+  )
+}
+
+/** "Keep measuring" as a countdown: what's still missing, and when it arrives at current traffic. */
+function Countdown({ f, report }: { f: { observationDays: number; minSamplePerArm: number }; report: FeatureReport }) {
+  const { credibility: c } = report
+  const smallest = report.kpis.length ? Math.min(...report.kpis.flatMap((k) => [k.control.n, k.treatment.n])) : 0
+  const farOff = (d: Date | null) => d !== null && d.getTime() - Date.now() > 365 * 86_400_000
+  const unproven = report.kpis.filter((k) => !k.significant && k.power.required !== null)
+  return (
+    <section className="rounded-xl border border-border bg-card p-6">
+      <p className="text-xs font-medium uppercase tracking-wide text-primary">When this becomes final</p>
+      <p className="mt-1 font-serif text-2xl font-semibold">
+        {report.srm && !report.srm.ok
+          ? "Not until the traffic split is fixed"
+          : c.credibleOn
+            ? longDate(c.credibleOn)
+            : "Not at current traffic"}
+      </p>
+      <div className="mt-4 grid gap-4 md:grid-cols-2">
+        <Progress
+          label="Observation window"
+          value={report.observedDays}
+          target={f.observationDays}
+          unit="days"
+          note={c.windowClosesOn ? `closes ${longDate(c.windowClosesOn)}` : undefined}
+        />
+        <Progress
+          label="Minimum sample, smallest arm"
+          value={smallest}
+          target={f.minSamplePerArm}
+          unit="per arm"
+          note={
+            report.sampleMet
+              ? "met"
+              : c.sampleReachedOn
+                ? `at ~${c.perArmPerDay.toFixed(0)}/day, reached ${longDate(c.sampleReachedOn)}`
+                : "no traffic yet"
+          }
+        />
+      </div>
+      {unproven.length > 0 && (
+        <ul className="mt-4 space-y-1 border-t border-border pt-3 text-sm">
+          {unproven.map((k) => (
+            <li key={k.key}>
+              <span className="font-medium">{k.name}</span>
+              <span className="text-muted-foreground">
+                : to detect its target it needs ~{k.power.required!.toLocaleString("en-IN")} per arm and has{" "}
+                {k.power.current.toLocaleString("en-IN")}.{" "}
+                {k.power.reached
+                  ? "Enough sample. If it's still not significant at the close, the effect is smaller than targeted."
+                  : k.power.reachedOn
+                    ? farOff(k.power.reachedOn)
+                      ? `At current traffic that's ${k.power.reachedOn.getFullYear()}, so effectively it can't be proven. Judge this feature on its other KPIs.`
+                      : `At current traffic, enough by ${longDate(k.power.reachedOn)}.`
+                    : "No traffic yet."}
+              </span>
+            </li>
+          ))}
+        </ul>
+      )}
+    </section>
+  )
+}
+
+function Progress({ label, value, target, unit, note }: { label: string; value: number; target: number; unit: string; note?: string }) {
+  const pctDone = Math.min(100, (value / Math.max(1, target)) * 100)
+  return (
+    <div>
+      <div className="mb-1 flex justify-between text-sm">
+        <span>{label}</span>
+        <span className="font-mono text-xs text-muted-foreground">
+          {value.toLocaleString("en-IN")} / {target.toLocaleString("en-IN")} {unit}
+        </span>
+      </div>
+      <div className="h-2 rounded-full bg-secondary" role="progressbar" aria-valuenow={Math.round(pctDone)} aria-valuemin={0} aria-valuemax={100} aria-label={label}>
+        <div className="h-2 rounded-full bg-primary" style={{ width: `${pctDone}%` }} />
+      </div>
+      {note && <p className="mt-1 text-xs text-muted-foreground">{note}</p>}
+    </div>
+  )
+}
+
+function MethodNote(p: {
+  kpis: { name: string; test: string }[]
+  minSample: number
+  smallestArm: number
+  sampleMet: boolean
+  windowDays: number
+  observedDays: number
+  windowMet: boolean
+  live: boolean
+  method: string
+  holm: boolean
+  srm: FeatureReport["srm"]
+}) {
+  const mark = (ok: boolean) => (ok ? <span className="text-status-good">met</span> : <span className="text-foreground">not yet</span>)
+  return (
+    <div className="rounded-xl border border-border bg-card p-4 text-sm">
+      <p className="mb-2 font-medium">
+        Method{" "}
+        <Link href="/playbook#method" className="text-xs font-normal text-primary hover:underline">
+          how significance is decided →
+        </Link>
+      </p>
+      <ul className="grid gap-x-8 gap-y-1 text-muted-foreground md:grid-cols-2">
+        <li>
+          {p.method}, two-sided tests at <span className="text-foreground">95% confidence</span> (an effect counts only if p &lt; 0.05)
+        </li>
+        {p.kpis.map((k) => (
+          <li key={k.name}>
+            {k.name}: <span className="text-foreground">{k.test}</span>
+          </li>
+        ))}
+        <li>
+          Minimum sample: {p.minSample.toLocaleString("en-IN")} per arm ·{" "}
+          {p.live ? (
+            <>
+              smallest arm {p.smallestArm.toLocaleString("en-IN")} · {mark(p.sampleMet)}
+            </>
+          ) : (
+            "not live yet"
+          )}
+        </li>
+        <li>
+          Observation window: {p.windowDays} days ·{" "}
+          {p.live ? (
+            <>
+              day {p.observedDays} · {mark(p.windowMet)}
+            </>
+          ) : (
+            "not live yet"
+          )}
+        </li>
+        {p.holm && (
+          <li>
+            <span className="text-foreground">Holm correction</span> across {p.kpis.length} KPIs, so testing several
+            doesn&apos;t inflate the chance of a false win
+          </li>
+        )}
+        {p.srm && (
+          <li>
+            Traffic split (SRM check): planned {Math.round(p.srm.expectedShare * 100)}% treatment, observed{" "}
+            {(p.srm.observedShare * 100).toFixed(1)}% ·{" "}
+            {p.srm.ok ? <span className="text-status-good">consistent</span> : <span className="font-medium text-status-critical">mismatch, results untrusted</span>}
+          </li>
+        )}
+      </ul>
     </div>
   )
 }

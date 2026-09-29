@@ -2,6 +2,7 @@ import { db } from "@/lib/db"
 import { parseGoals, type FeatureStatus } from "@/lib/domain"
 import type { FeatureWithSpec } from "@/lib/analytics/report"
 import { ADMITTED } from "@/lib/registry"
+import { daysNeeded, expectedPerArm, requiredPerArm } from "@/lib/analytics/power"
 
 /**
  * Release gates. A feature only moves forward when every check for its next
@@ -34,13 +35,56 @@ export function specChecks(f: FeatureWithSpec): Check[] {
       label: "Every KPI can be monetised (volume and ₹ value set)",
       ok: f.kpis.every((k) => k.monthlyVolume > 0 && k.valuePerUnit > 0),
     },
+    {
+      label: "Every ₹ value names where it comes from",
+      ok: f.kpis.length > 0 && f.kpis.every((k) => k.valueSource.trim().length > 0),
+      detail: f.kpis.filter((k) => !k.valueSource.trim()).map((k) => `missing for ${k.kpi.name.toLowerCase()}`).join("; ") || undefined,
+    },
+    ...powerChecks(f),
     { label: "Attribution plan: segment in scope", ok: f.segment.trim().length > 0 },
     { label: "Minimum sample per arm ≥ 100", ok: f.minSamplePerArm >= 100, detail: `${f.minSamplePerArm}` },
     { label: "Observation window ≥ 14 days", ok: f.observationDays >= 14, detail: `${f.observationDays} days` },
-    { label: "Approved by product", ok: f.productApproved },
-    { label: "Approved by engineering", ok: f.engineeringApproved },
-    { label: "Approved by analytics", ok: f.analyticsApproved },
+    { label: "Approved by product", ok: f.productApproved, detail: f.productApprovedBy ?? undefined },
+    { label: "Approved by engineering", ok: f.engineeringApproved, detail: f.engineeringApprovedBy ?? undefined },
+    { label: "Approved by analytics", ok: f.analyticsApproved, detail: f.analyticsApprovedBy ?? undefined },
   ]
+}
+
+/**
+ * Can this test actually prove what it's promising? For each KPI whose sample
+ * size can be computed, compare the sample the target change needs with the
+ * sample the planned traffic and window will deliver. If the window can't get
+ * there, the fix is a longer window, a 50/50 split or a bigger target change.
+ */
+function powerChecks(f: FeatureWithSpec): Check[] {
+  const prePost = f.attributionMethod === "PRE_POST"
+  const checks: Check[] = []
+  if (!prePost) {
+    checks.push({
+      label: "Traffic split is between 1% and 99% treatment",
+      ok: f.treatmentShare >= 0.01 && f.treatmentShare <= 0.99,
+      detail: `${Math.round(f.treatmentShare * 100)}% treatment`,
+    })
+  }
+  for (const k of f.kpis) {
+    const required = requiredPerArm(k.kpi.calculation, k.baseline, k.targetDelta)
+    if (required === null) continue
+    // Pre/post compares two full windows of traffic, so each "arm" gets all of it.
+    const expected = prePost
+      ? expectedPerArm(k.kpi.calculation, k.monthlyVolume, f.observationDays, 0.5) * 2
+      : expectedPerArm(k.kpi.calculation, k.monthlyVolume, f.observationDays, f.treatmentShare)
+    const ok = expected >= required
+    const days = prePost ? null : daysNeeded(k.kpi.calculation, k.monthlyVolume, f.treatmentShare, required)
+    checks.push({
+      label: `${k.kpi.name} can reach significance in the window`,
+      ok,
+      detail: ok
+        ? `needs ~${required.toLocaleString("en-IN")} per arm; window gives ~${expected.toLocaleString("en-IN")}`
+        : `needs ~${required.toLocaleString("en-IN")} per arm but the window gives ~${expected.toLocaleString("en-IN")}` +
+          (days ? `. Run ~${days} days, split closer to 50/50, or target a bigger change` : ". Target a bigger change or add traffic"),
+    })
+  }
+  return checks
 }
 
 /** Actions the feature's KPIs are computed from — these must be instrumented before release. */

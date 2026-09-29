@@ -88,7 +88,12 @@ const DISTRICTS = ["Thanjavur", "Madurai", "Coimbatore", "Tiruchirappalli", "Sal
 async function main() {
   // Seeding wipes every table. Never do that to a database with data in it by accident.
   const existing = await db.feature.count()
-  if (existing > 0 && !process.argv.includes("--reset")) {
+  // --if-empty (run by every deploy): load demo data into a fresh database, otherwise do nothing.
+  if (process.argv.includes("--if-empty")) {
+    if (process.env.SKIP_DEMO_SEED) return console.log("SKIP_DEMO_SEED is set; not loading demo data.")
+    if (existing > 0) return console.log(`Database already has ${existing} features; leaving it alone.`)
+    console.log("Empty database: loading the demo scenario.")
+  } else if (existing > 0 && !process.argv.includes("--reset")) {
     console.error(
       `Refusing to seed: this database already has ${existing} features, and seeding deletes everything.\n` +
         "If you really want to replace it with demo data, run: npm run db:seed -- --reset",
@@ -141,8 +146,8 @@ async function main() {
         ...approved,
         kpis: {
           create: [
-            { kpiId: kpi.checkout_conversion, baseline: 0.42, targetDelta: 0.05, monthlyVolume: 20000, valuePerUnit: 120 },
-            { kpiId: kpi.time_to_checkout, baseline: 95, targetDelta: -20, monthlyVolume: 9000, valuePerUnit: 0.5 },
+            { kpiId: kpi.checkout_conversion, baseline: 0.42, targetDelta: 0.05, monthlyVolume: 20000, valuePerUnit: 120, valueSource: "Average margin per input order, FY25 finance ledger (illustrative)" },
+            { kpiId: kpi.time_to_checkout, baseline: 95, targetDelta: -20, monthlyVolume: 9000, valuePerUnit: 0.5, valueSource: "Analytics model: fewer abandoned carts per second saved (illustrative)" },
           ],
         },
         costs: {
@@ -187,7 +192,7 @@ async function main() {
         decisionNote: "Keep it on, no new investment. Re-measure with a district-staggered rollout next season to separate the feature from the harvest.",
         decidedAt: new Date(NOW - 3 * DAY),
         ...approved,
-        kpis: { create: [{ kpiId: kpi.produce_sale_rate, baseline: 0.3, targetDelta: 0.05, monthlyVolume: 15000, valuePerUnit: 35 }] },
+        kpis: { create: [{ kpiId: kpi.produce_sale_rate, baseline: 0.3, targetDelta: 0.05, monthlyVolume: 15000, valuePerUnit: 35, valueSource: "Platform fee per completed produce sale (illustrative)" }] },
         costs: {
           create: [
             { category: "DEVELOPMENT", recurrence: "ONE_TIME", amount: 250000, note: "1 engineer × 3 weeks" },
@@ -220,8 +225,8 @@ async function main() {
         ...approved,
         kpis: {
           create: [
-            { kpiId: kpi.advice_acceptance_rate, baseline: 0.3, targetDelta: 0.1, monthlyVolume: 12000, valuePerUnit: 150 },
-            { kpiId: kpi.support_tickets_per_1k, baseline: 10, targetDelta: -4, monthlyVolume: 25, valuePerUnit: 150 },
+            { kpiId: kpi.advice_acceptance_rate, baseline: 0.3, targetDelta: 0.1, monthlyVolume: 12000, valuePerUnit: 150, valueSource: "Average margin on recommended inputs (illustrative)" },
+            { kpiId: kpi.support_tickets_per_1k, baseline: 10, targetDelta: -4, monthlyVolume: 25, valuePerUnit: 150, valueSource: "Call-centre budget ÷ tickets handled, FY25 (illustrative)" },
           ],
         },
         costs: {
@@ -257,13 +262,13 @@ async function main() {
         key: "tamil_voice_search", name: "Tamil voice search", team: "Discovery", owner: "Karthik V. (Discovery PM)",
         summary: "Search schemes, inputs and prices by speaking in Tamil instead of typing.",
         goals: goals(["EXPERIENCE", "More searches end in a useful result"], ["COST_SAVINGS", "Fewer 'can't find it' support calls"]),
-        attributionMethod: "PHASED_ROLLOUT", segment: "20% of Android users on app ≥ 4.3, expanding to 50% after the window",
+        attributionMethod: "PHASED_ROLLOUT", treatmentShare: 0.2, segment: "20% of Android users on app ≥ 4.3, expanding to 50% after the window",
         minSamplePerArm: 400, observationDays: 28, status: "SHIPPED", releaseVersion: "4.3.0", releasedAt: new Date(released),
         ...approved,
         kpis: {
           create: [
-            { kpiId: kpi.search_success_rate, baseline: 0.55, targetDelta: 0.08, monthlyVolume: 40000, valuePerUnit: 6 },
-            { kpiId: kpi.support_tickets_per_1k, baseline: 12, targetDelta: -3, monthlyVolume: 80, valuePerUnit: 250 },
+            { kpiId: kpi.search_success_rate, baseline: 0.55, targetDelta: 0.08, monthlyVolume: 40000, valuePerUnit: 6, valueSource: "Assisted orders per successful search, analytics estimate (illustrative)" },
+            { kpiId: kpi.support_tickets_per_1k, baseline: 12, targetDelta: -3, monthlyVolume: 80, valuePerUnit: 250, valueSource: "Call-centre budget ÷ tickets handled, FY25 (illustrative)" },
           ],
         },
         costs: {
@@ -300,8 +305,8 @@ async function main() {
       minSamplePerArm: 300, observationDays: 21, status: "IN_DEVELOPMENT", ...approved,
       kpis: {
         create: [
-          { kpiId: kpi.form_completion_time, baseline: 540, targetDelta: -120, monthlyVolume: 6000, valuePerUnit: 0.3 },
-          { kpiId: kpi.errors_per_1k, baseline: 45, targetDelta: -20, monthlyVolume: 30, valuePerUnit: 400 },
+          { kpiId: kpi.form_completion_time, baseline: 540, targetDelta: -120, monthlyVolume: 6000, valuePerUnit: 0.3, valueSource: "Field-officer time on assisted applications (illustrative)" },
+          { kpiId: kpi.errors_per_1k, baseline: 45, targetDelta: -20, monthlyVolume: 30, valuePerUnit: 400, valueSource: "Cost to resolve a failed submission (illustrative)" },
         ],
       },
       costs: { create: [{ category: "DEVELOPMENT", recurrence: "ONE_TIME", amount: 600000, note: "Local-first sync layer" }] },
@@ -327,6 +332,18 @@ async function main() {
       kpis: { create: [{ kpiId: kpi.produce_sale_rate, baseline: 0.3, targetDelta: 0.04, monthlyVolume: 0, valuePerUnit: 0 }] },
     },
   })
+
+  // ── Named sign-offs (illustrative people, like everything else here) ───
+  for (const f of await db.feature.findMany()) {
+    await db.feature.update({
+      where: { id: f.id },
+      data: {
+        productApprovedBy: f.productApproved ? f.owner : null,
+        engineeringApprovedBy: f.engineeringApproved ? "S. Prakash (Engineering lead)" : null,
+        analyticsApprovedBy: f.analyticsApproved ? "N. Fathima (Analytics)" : null,
+      },
+    })
+  }
 
   // ── Review logs ────────────────────────────────────────────────────────
   // Figures quoted here match what the ROI layer computes from this seed.

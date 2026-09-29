@@ -7,10 +7,10 @@ import { cn } from "@/lib/utils"
 
 const LINKS = [
   { href: "/", label: "Portfolio" },
+  { href: "/playbook", label: "How it works" },
+  { href: "/demo", label: "Try it live" },
   { href: "/kpis", label: "KPI catalogue" },
   { href: "/features/new", label: "New spec" },
-  { href: "/demo", label: "Live demo" },
-  { href: "/playbook", label: "Playbook" },
 ]
 
 export function AppNav() {

@@ -1,7 +1,8 @@
 import { db } from "@/lib/db"
 import type { AttributionMethod, KpiCalculation } from "@/lib/domain"
 import { ADMITTED } from "@/lib/registry"
-import { moments, twoProportion, welch, type TestResult } from "./stats"
+import { holm, moments, srmPValue, twoProportion, welch, type TestResult } from "./stats"
+import { requiredPerArm } from "./power"
 import type { Prisma } from "@/lib/generated/tnimpact/client"
 
 /**
@@ -46,11 +47,16 @@ export type KpiResult = {
   improvement: number | null
   ciLow: number | null
   ciHigh: number | null
+  /** raw p-value from the KPI's own test */
   pValue: number | null
+  /** Holm-adjusted across this feature's KPIs; this is what significance uses */
+  pAdjusted: number | null
   significant: boolean
   targetMet: boolean
   /** ₹/month; 0 unless the effect is significant */
   monthlyBenefit: number
+  /** Sample needed per arm to detect the spec's target change (α 0.05, power 0.8) */
+  power: { required: number | null; current: number; reached: boolean; reachedOn: Date | null }
 }
 
 export type Recommendation =
@@ -71,8 +77,18 @@ export type FeatureReport = {
   totalBenefit: number
   totalCost: number
   roi: number | null
+  /** Sample-ratio-mismatch check on exposed users; null for pre/post designs */
+  srm: { expectedShare: number; observedShare: number; control: number; treatment: number; pValue: number | null; ok: boolean } | null
+  /** When "keep measuring" ends, projected from the traffic seen so far */
+  credibility: { windowClosesOn: Date | null; sampleReachedOn: Date | null; credibleOn: Date | null; perArmPerDay: number }
+  /** ROI if the spec's ₹ values are 50%, 100% and 150% of what was assumed */
+  sensitivity: { factor: number; roi: number | null }[]
+  /** Fraction of the assumed ₹ values at which proven value exactly covers cost */
+  breakEvenFactor: number | null
   recommendation: Recommendation
 }
+
+export const SRM_THRESHOLD = 0.001
 
 function armsFor(method: AttributionMethod): [string, string] {
   return method === "PRE_POST" ? ["Before release", "After release"] : ["Control", "Treatment"]
@@ -147,6 +163,7 @@ function test(c: ArmComputation, t: ArmComputation): TestResult | null {
   return null
 }
 
+/** Per-KPI result before Holm: significance and benefit are settled across all KPIs in buildReport. */
 function kpiResult(fk: FeatureKpiWithDef, control: EventRow[], treatment: EventRow[]): KpiResult {
   const { kpi } = fk
   const calc = kpi.calculation as KpiCalculation
@@ -175,26 +192,76 @@ function kpiResult(fk: FeatureKpiWithDef, control: EventRow[], treatment: EventR
     ciLow: r?.ciLow ?? null,
     ciHigh: r?.ciHigh ?? null,
     pValue: r?.pValue ?? null,
+    pAdjusted: r?.pValue ?? null,
     significant,
     targetMet: significant && improvement !== null && improvement >= targetImprovement,
     monthlyBenefit: significant && improvement !== null ? improvement * fk.monthlyVolume * fk.valuePerUnit : 0,
+    power: { required: null, current: 0, reached: false, reachedOn: null },
   }
 }
+
+/** Re-decide significance with Holm-adjusted p-values; benefit only follows a surviving effect. */
+function applyHolm(kpis: KpiResult[], specs: FeatureKpiWithDef[]): KpiResult[] {
+  const adjusted = holm(kpis.map((k) => k.pValue))
+  return kpis.map((k, i) => {
+    const pAdjusted = adjusted[i]
+    const significant = pAdjusted !== null && pAdjusted < SIGNIFICANCE
+    const fk = specs[i]
+    return {
+      ...k,
+      pAdjusted,
+      significant,
+      targetMet: significant && k.improvement !== null && k.improvement >= Math.abs(fk.targetDelta),
+      monthlyBenefit: significant && k.improvement !== null ? k.improvement * fk.monthlyVolume * fk.valuePerUnit : 0,
+    }
+  })
+}
+
+async function sampleRatio(feature: FeatureWithSpec): Promise<FeatureReport["srm"]> {
+  if (feature.attributionMethod === "PRE_POST" || !feature.releasedAt) return null
+  const exposed = await db.event.findMany({
+    where: { ...ADMITTED, featureFlag: feature.key, action: "feature_exposed", variant: { in: ["control", "treatment"] } },
+    distinct: ["userId", "variant"],
+    select: { variant: true },
+  })
+  const treatment = exposed.filter((e) => e.variant === "treatment").length
+  const control = exposed.length - treatment
+  const pValue = srmPValue(control, treatment, feature.treatmentShare)
+  return {
+    expectedShare: feature.treatmentShare,
+    observedShare: exposed.length ? treatment / exposed.length : 0,
+    control,
+    treatment,
+    pValue,
+    ok: pValue === null || pValue >= SRM_THRESHOLD,
+  }
+}
+
+const addDays = (from: Date, days: number) => new Date(from.getTime() + Math.ceil(days) * DAY)
 
 function recommend(feature: FeatureWithSpec, r: Omit<FeatureReport, "recommendation">): Recommendation {
   if (feature.status !== "SHIPPED" && feature.status !== "RETIRED") {
     return { kind: "NOT_LIVE", reason: "Not released yet — nothing to measure." }
   }
+  if (r.srm && !r.srm.ok) {
+    return {
+      kind: "KEEP_MEASURING",
+      reason: `The traffic split is broken: planned ${Math.round(r.srm.expectedShare * 100)}% treatment, got ${(r.srm.observedShare * 100).toFixed(1)}%. No result from this test can be trusted until assignment is fixed.`,
+    }
+  }
+  const when = r.credibility.credibleOn
+    ? ` Final on ${r.credibility.credibleOn.toLocaleDateString("en-IN", { day: "numeric", month: "short" })} at current traffic.`
+    : ""
   if (!r.windowMet) {
     return {
       kind: "KEEP_MEASURING",
-      reason: `${r.observedDays} of ${feature.observationDays} observation days elapsed.`,
+      reason: `${r.observedDays} of ${feature.observationDays} observation days elapsed.${when}`,
     }
   }
   if (!r.sampleMet) {
     return {
       kind: "KEEP_MEASURING",
-      reason: `Needs ${feature.minSamplePerArm} users per arm; smallest arm has ${Math.min(...r.kpis.flatMap((k) => [k.control.n, k.treatment.n]))}.`,
+      reason: `Needs ${feature.minSamplePerArm} per arm; smallest arm has ${Math.min(...r.kpis.flatMap((k) => [k.control.n, k.treatment.n]))}.${when}`,
     }
   }
   const worse = r.kpis.filter((k) => k.significant && (k.improvement ?? 0) < 0).map((k) => k.name.toLowerCase())
@@ -218,12 +285,40 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
     ...new Set(feature.kpis.flatMap((fk) => [fk.kpi.numeratorAction, fk.kpi.denominatorAction].filter((a): a is string => !!a))),
   ]
   const live = !!feature.releasedAt
-  const { control, treatment } = live ? await loadEvents(feature, actions) : { control: [], treatment: [] }
-  const kpis = feature.kpis.map((fk) => kpiResult(fk, control, treatment))
-
+  const [{ control, treatment }, srm] = await Promise.all([
+    live ? loadEvents(feature, actions) : Promise.resolve({ control: [] as EventRow[], treatment: [] as EventRow[] }),
+    sampleRatio(feature),
+  ])
   const observedDays = feature.releasedAt ? Math.floor((now.getTime() - feature.releasedAt.getTime()) / DAY) : 0
+  const daysRunning = Math.max(1, Math.min(observedDays, feature.attributionMethod === "PRE_POST" ? feature.observationDays : observedDays))
+
+  const kpis = applyHolm(
+    feature.kpis.map((fk) => kpiResult(fk, control, treatment)),
+    feature.kpis,
+  ).map((k, i) => {
+    // Power: the sample this KPI needs to detect its own target, and when traffic gets it there.
+    const fk = feature.kpis[i]
+    const required = requiredPerArm(fk.kpi.calculation, fk.baseline, fk.targetDelta)
+    const current = Math.min(k.control.n, k.treatment.n)
+    const rate = current / daysRunning
+    const reached = required !== null && current >= required
+    const reachedOn = required === null || reached || rate <= 0 ? null : addDays(now, (required - current) / rate)
+    return { ...k, power: { required, current, reached, reachedOn } }
+  })
+
   const windowMet = live && observedDays >= feature.observationDays
   const sampleMet = kpis.length > 0 && kpis.every((k) => k.control.n >= feature.minSamplePerArm && k.treatment.n >= feature.minSamplePerArm)
+
+  // "Keep measuring" as a countdown: the window's close, and when the slowest arm reaches the minimum sample.
+  const smallest = kpis.length ? Math.min(...kpis.flatMap((k) => [k.control.n, k.treatment.n])) : 0
+  const perArmPerDay = live ? smallest / daysRunning : 0
+  const windowClosesOn = feature.releasedAt ? addDays(feature.releasedAt, feature.observationDays) : null
+  const sampleReachedOn =
+    !live || sampleMet ? null : perArmPerDay > 0 ? addDays(now, (feature.minSamplePerArm - smallest) / perArmPerDay) : null
+  const credibleOn =
+    !live || (!sampleMet && perArmPerDay <= 0)
+      ? null
+      : new Date(Math.max(windowClosesOn?.getTime() ?? 0, sampleReachedOn?.getTime() ?? 0, now.getTime()))
 
   const oneTimeCost = feature.costs.filter((c) => c.recurrence === "ONE_TIME").reduce((a, c) => a + c.amount, 0)
   const monthlyCost = feature.costs.filter((c) => c.recurrence === "MONTHLY").reduce((a, c) => a + c.amount, 0)
@@ -238,13 +333,20 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
     observedDays,
     windowMet,
     sampleMet,
-    credible: windowMet && sampleMet,
+    credible: windowMet && sampleMet && (srm?.ok ?? true),
     monthlyBenefit,
     oneTimeCost,
     monthlyCost,
     totalBenefit,
     totalCost,
     roi,
+    srm,
+    credibility: { windowClosesOn, sampleReachedOn, credibleOn, perArmPerDay },
+    sensitivity: [0.5, 1, 1.5].map((factor) => ({
+      factor,
+      roi: live && totalCost > 0 ? (totalBenefit * factor - totalCost) / totalCost : null,
+    })),
+    breakEvenFactor: live && totalBenefit > 0 ? totalCost / totalBenefit : null,
   }
   return { ...partial, recommendation: recommend(feature, partial) }
 }

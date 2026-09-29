@@ -28,7 +28,12 @@ export async function GET(_req: Request, { params }: Ctx) {
 }
 
 const patchInput = z.discriminatedUnion("op", [
-  z.object({ op: z.literal("approve"), role: z.enum(["product", "engineering", "analytics"]), approved: z.boolean() }),
+  z.object({
+    op: z.literal("approve"),
+    role: z.enum(["product", "engineering", "analytics"]),
+    approved: z.boolean(),
+    by: z.string().trim().min(2, "Sign-off needs the name of the person approving").max(80),
+  }),
   z.object({ op: z.literal("advance"), releaseVersion: z.string().max(32).optional() }),
   z.object({
     op: z.literal("decide"),
@@ -42,15 +47,31 @@ export async function PATCH(req: Request, { params }: Ctx) {
   const feature = await load((await params).key)
   if (!feature) return NextResponse.json({ error: "Not found" }, { status: 404 })
   const parsed = patchInput.safeParse(await req.json().catch(() => null))
-  if (!parsed.success) return NextResponse.json({ error: "Invalid request" }, { status: 400 })
+  if (!parsed.success) {
+    return NextResponse.json({ error: parsed.error.issues[0]?.message ?? "Invalid request" }, { status: 400 })
+  }
   const body = parsed.data
 
   if (body.op === "approve") {
     if (feature.status !== "DRAFT") {
       return NextResponse.json({ error: "Approvals are locked once the spec is approved" }, { status: 409 })
     }
-    const field = `${body.role}Approved` as const
-    await db.feature.update({ where: { id: feature.id }, data: { [field]: body.approved } })
+    await db.feature.update({
+      where: { id: feature.id },
+      data: {
+        [`${body.role}Approved`]: body.approved,
+        [`${body.role}ApprovedBy`]: body.approved ? body.by : null,
+        notes: {
+          create: {
+            kind: "SYSTEM",
+            author: "Sign-off",
+            body: body.approved
+              ? `${body.by} signed off the spec for ${body.role}.`
+              : `${body.by} withdrew the ${body.role} sign-off.`,
+          },
+        },
+      },
+    })
     return NextResponse.json({ ok: true })
   }
 

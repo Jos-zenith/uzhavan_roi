@@ -26,11 +26,13 @@ const specInput = z.object({
         targetDelta: z.number().finite(),
         monthlyVolume: z.number().finite().nonnegative(),
         valuePerUnit: z.number().finite().nonnegative(),
+        valueSource: z.string().trim().max(200).default(""),
       }),
     )
     .min(1, "Map at least one KPI")
     .max(3, "At most 3 KPIs — pick the ones that matter"),
   attributionMethod: z.enum(ATTRIBUTION_METHODS),
+  treatmentShare: z.number().min(0.01).max(0.99).default(0.5),
   segment: z.string().min(3).max(200),
   minSamplePerArm: z.number().int().positive(),
   observationDays: z.number().int().positive(),

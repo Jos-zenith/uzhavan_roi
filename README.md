@@ -20,7 +20,9 @@ The warehouse is Postgres. Locally, Prisma runs one for you:
 ```bash
 npm install
 npx prisma dev -n impact -d        # local Postgres; `npx prisma dev ls` shows its TCP URL
-# put that postgres://… TCP URL in .env as DATABASE_URL
+# put that postgres://… TCP URL in .env as DATABASE_URL, with the database
+# changed from /template1 to /postgres (Postgres copies template1 into every
+# new database, which breaks Prisma's shadow database if you use it directly)
 npm run db:setup                   # migrate, generate the client, seed demo data
 npm run dev                        # http://localhost:3000
 ```
@@ -31,9 +33,11 @@ npm run dev                        # http://localhost:3000
    This sets `DATABASE_URL` (pooled, used by the app) and `DATABASE_URL_UNPOOLED` (direct, used for migrations).
 2. Redeploy. The build runs `prisma migrate deploy` before `next build`, so the schema is created or updated
    on every deploy, and a missing database fails the build instead of serving 500s.
-3. Load the demo data **once**, from your machine, using the direct connection string from Neon:
-   `DATABASE_URL="postgres://…" npm run db:seed`. Seeding refuses to run on a database that already has
-   data unless you add `-- --reset`, because it deletes everything.
+3. There's no step 3. The build runs `tsx db/seed.ts --if-empty`, which loads the demo scenario into an
+   **empty** database and leaves one with data alone, so the first deploy opens on a full portfolio. Set
+   `SKIP_DEMO_SEED=1` to turn that off. To replace existing data with the demo by hand:
+   `DATABASE_URL="postgres://…" npm run db:seed -- --reset` (without `--reset` it refuses, because seeding
+   deletes everything).
 
 `DATABASE_POOL_MAX` (default 3) caps connections per server instance. Pages run many queries in parallel,
 so an uncapped pool per serverless instance exhausts hosted connection limits quickly.

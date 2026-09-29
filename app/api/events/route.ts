@@ -3,6 +3,26 @@ import { db } from "@/lib/db"
 import { registeredFlags, releaseQuarantine } from "@/lib/registry"
 import { ingestBatchSchema } from "@/lib/telemetry/schema"
 
+const MAX_BODY_BYTES = 2 * 1024 * 1024 // after decompression
+
+class BodyError extends Error {}
+
+/** JSON body, gzip-decoded when the SDK compressed it (it does whenever the browser can). */
+async function readBody(req: Request): Promise<unknown> {
+  const raw = new Uint8Array(await req.arrayBuffer())
+  let bytes = raw
+  if ((req.headers.get("content-encoding") ?? "").toLowerCase() === "gzip") {
+    try {
+      const stream = new Blob([raw]).stream().pipeThrough(new DecompressionStream("gzip"))
+      bytes = new Uint8Array(await new Response(stream).arrayBuffer())
+    } catch {
+      throw new BodyError("Body is marked gzip but isn't valid gzip")
+    }
+  }
+  if (bytes.length > MAX_BODY_BYTES) throw new BodyError("Batch too large; send at most 500 events per request")
+  return JSON.parse(new TextDecoder().decode(bytes))
+}
+
 /**
  * Ingest endpoint for the telemetry SDK. Validates against the common schema,
  * is idempotent on `eventId`, and quarantines events whose feature flag has
@@ -11,9 +31,9 @@ import { ingestBatchSchema } from "@/lib/telemetry/schema"
 export async function POST(req: Request) {
   let body: unknown
   try {
-    body = await req.json()
-  } catch {
-    return NextResponse.json({ error: "Body must be JSON" }, { status: 400 })
+    body = await readBody(req)
+  } catch (err) {
+    return NextResponse.json({ error: err instanceof BodyError ? err.message : "Body must be JSON" }, { status: 400 })
   }
   const parsed = ingestBatchSchema.safeParse(body)
   if (!parsed.success) {

@@ -42,13 +42,18 @@ model Feature {
   goals               String // JSON: [{ type, statement }], 1–3 entries
   attributionMethod   String // AB_TEST | PHASED_ROLLOUT | PRE_POST
   segment             String
+  treatmentShare      Float     @default(0.5) // planned share of traffic in treatment
   minSamplePerArm     Int
   observationDays     Int
   horizonMonths       Int       @default(12)
   qualitativeBenefits String    @default("")
-  productApproved     Boolean   @default(false)
-  engineeringApproved Boolean   @default(false)
-  analyticsApproved   Boolean   @default(false)
+  productApproved       Boolean @default(false)
+  engineeringApproved   Boolean @default(false)
+  analyticsApproved     Boolean @default(false)
+  /// Who signed each role off. Names aren't verified yet (no SSO); every change is in the review log.
+  productApprovedBy     String?
+  engineeringApprovedBy String?
+  analyticsApprovedBy   String?
   releaseVersion      String?
   releasedAt          DateTime?
   decision            String? // SCALE | ITERATE | RETIRE
@@ -87,6 +92,7 @@ model FeatureKpi {
   targetDelta   Float // signed, in KPI units (0.05 = +5 pp for a ratio)
   monthlyVolume Float // units the KPI applies to per month at full rollout
   valuePerUnit  Float // ₹ per unit of improvement per volume unit
+  valueSource   String @default("") // where the ₹ figure comes from; required by the spec gate
 
   feature Feature       @relation(fields: [featureId], references: [id], onDelete: Cascade)
   kpi     KpiDefinition @relation(fields: [kpiId], references: [id])

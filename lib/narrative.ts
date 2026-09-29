@@ -140,11 +140,24 @@ export function briefing(rows: Row[], quarantined: { flag: string; events: numbe
         href: `/features/${r.f.key}#review`,
         action: "Record a decision",
       })
+    } else if (r.report.srm && !r.report.srm.ok) {
+      items.push({
+        tone: "urgent",
+        title: `${r.f.name}: the traffic split is broken`,
+        detail: `Planned ${Math.round(r.report.srm.expectedShare * 100)}% treatment, observed ${(r.report.srm.observedShare * 100).toFixed(1)}%. Fix assignment before trusting any result from this test.`,
+        href: `/features/${r.f.key}`,
+        action: "Investigate",
+      })
     } else if (r.review.kind === "DUE") {
+      const final = r.report.credibility.credibleOn
       items.push({
         tone: "info",
-        title: `${r.f.name}: review on ${longDate(r.review.at)}`,
-        detail: "Its test window is still open. Don't expand the rollout on early numbers.",
+        title: `${r.f.name}: final on ${longDate(final ?? r.review.at)}`,
+        detail:
+          "Its test window is still open. Don't expand the rollout on early numbers." +
+          (r.report.kpis.some((k) => !k.significant && k.power.required !== null && !k.power.reached && k.power.reachedOn && k.power.reachedOn.getTime() - Date.now() > 365 * 86_400_000)
+            ? " One of its KPIs can't be proven at this traffic, so judge it on the others."
+            : ""),
         href: `/features/${r.f.key}`,
         action: "See early read",
       })

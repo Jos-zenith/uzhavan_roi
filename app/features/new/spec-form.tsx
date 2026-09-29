@@ -15,9 +15,10 @@ import {
   type KpiCalculation,
 } from "@/lib/domain"
 import { cn } from "@/lib/utils"
+import { daysNeeded, expectedPerArm, requiredPerArm } from "@/lib/analytics/power"
 
 type KpiOption = { id: string; name: string; unit: string; direction: string; calculation: string }
-type KpiRow = { kpiId: string; baseline: string; targetDelta: string; monthlyVolume: string; valuePerUnit: string }
+type KpiRow = { kpiId: string; baseline: string; targetDelta: string; monthlyVolume: string; valuePerUnit: string; valueSource: string }
 
 const input =
   "h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -42,8 +43,9 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
   const [owner, setOwner] = useState("")
   const [team, setTeam] = useState("")
   const [goals, setGoals] = useState<{ type: GoalType; statement: string }[]>([{ type: "REVENUE", statement: "" }])
-  const [rows, setRows] = useState<KpiRow[]>([{ kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "" }])
+  const [rows, setRows] = useState<KpiRow[]>([{ kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "", valueSource: "" }])
   const [method, setMethod] = useState<AttributionMethod>("AB_TEST")
+  const [share, setShare] = useState("50") // % of traffic in treatment
   const [segment, setSegment] = useState("")
   const [minSample, setMinSample] = useState("400")
   const [windowDays, setWindowDays] = useState("28")
@@ -77,9 +79,11 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
             targetDelta: toStored(r.targetDelta, unit),
             monthlyVolume: Number(r.monthlyVolume),
             valuePerUnit: Number(r.valuePerUnit),
+            valueSource: r.valueSource,
           }
         }),
         attributionMethod: method,
+        treatmentShare: method === "PRE_POST" ? 0.5 : Number(share) / 100,
         segment,
         minSamplePerArm: Number(minSample),
         observationDays: Number(windowDays),
@@ -199,13 +203,28 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
                   <Field label="₹ value per unit" hint={k.unit === "RATIO" ? "₹ per extra converting user" : k.unit === "SECONDS" ? "₹ per second saved" : "₹ per avoided event"}>
                     <input className={input} type="number" step="any" min={0} required value={r.valuePerUnit} onChange={(e) => setRow(i, { valuePerUnit: e.target.value })} />
                   </Field>
+                  <div className="sm:col-span-2 lg:col-span-4">
+                    <Field label="Where does the ₹ value come from?" hint="A report, ledger or model someone can check. The spec can't be approved without one.">
+                      <input className={input} required value={r.valueSource} onChange={(e) => setRow(i, { valueSource: e.target.value })} placeholder="e.g. Average margin per input order, FY25 finance ledger" />
+                    </Field>
+                  </div>
+                  <div className="sm:col-span-2 lg:col-span-4">
+                    <PowerReadout
+                      calculation={k.calculation}
+                      baseline={toStored(r.baseline, k.unit)}
+                      delta={toStored(r.targetDelta, k.unit)}
+                      volume={Number(r.monthlyVolume)}
+                      windowDays={Number(windowDays)}
+                      share={method === "PRE_POST" ? null : Number(share) / 100}
+                    />
+                  </div>
                 </div>
               )}
             </div>
           )
         })}
         {rows.length < 3 && (
-          <AddButton onClick={() => setRows([...rows, { kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "" }])}>
+          <AddButton onClick={() => setRows([...rows, { kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "", valueSource: "" }])}>
             Add KPI
           </AddButton>
         )}
@@ -219,7 +238,10 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
               type="button"
               role="radio"
               aria-checked={method === m}
-              onClick={() => setMethod(m)}
+              onClick={() => {
+                setMethod(m)
+                setShare(m === "PHASED_ROLLOUT" ? "20" : "50")
+              }}
               className={cn(
                 "rounded-md border px-3 py-1.5 text-sm",
                 method === m ? "border-primary bg-primary/15" : "border-border text-muted-foreground hover:bg-secondary",
@@ -232,7 +254,12 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
         <Field label="Traffic / segment in scope">
           <input className={input} required value={segment} onChange={(e) => setSegment(e.target.value)} placeholder="e.g. 50/50 split of returning buyers in delta districts" />
         </Field>
-        <div className="grid gap-4 sm:grid-cols-3">
+        <div className="grid gap-4 sm:grid-cols-2 lg:grid-cols-4">
+          {method !== "PRE_POST" && (
+            <Field label="Treatment share (%)" hint={method === "PHASED_ROLLOUT" ? "the rollout's current step" : "50 gives the most power"}>
+              <input className={input} type="number" min={1} max={99} required value={share} onChange={(e) => setShare(e.target.value)} />
+            </Field>
+          )}
           <Field label="Minimum users per arm" hint="policy: ≥ 100">
             <input className={input} type="number" min={1} required value={minSample} onChange={(e) => setMinSample(e.target.value)} />
           </Field>
@@ -288,5 +315,41 @@ function RemoveButton({ onClick }: { onClick: () => void }) {
     <Button type="button" variant="ghost" size="icon" onClick={onClick} aria-label="Remove">
       <X className="h-4 w-4" />
     </Button>
+  )
+}
+
+/** Live sample-size check: can this test prove its own target within its window? */
+function PowerReadout(p: { calculation: string; baseline: number; delta: number; volume: number; windowDays: number; share: number | null }) {
+  if (!Number.isFinite(p.baseline) || !p.delta || !p.volume || !p.windowDays) {
+    return <p className="text-xs text-muted-foreground">Fill in baseline, target, volume and window to see whether this test can succeed.</p>
+  }
+  const required = requiredPerArm(p.calculation, p.baseline, p.delta)
+  if (required === null) {
+    return (
+      <p className="text-xs text-muted-foreground">
+        Sample size for averages needs an estimate of the spread, which this form doesn&apos;t collect yet. Check it with analytics.
+      </p>
+    )
+  }
+  const expected =
+    p.share === null
+      ? expectedPerArm(p.calculation, p.volume, p.windowDays, 0.5) * 2
+      : expectedPerArm(p.calculation, p.volume, p.windowDays, p.share)
+  const ok = expected >= required
+  const days = p.share === null ? null : daysNeeded(p.calculation, p.volume, p.share, required)
+  const n = (v: number) => v.toLocaleString("en-IN")
+  return (
+    <p className={cn("rounded-md px-3 py-2 text-sm", ok ? "bg-status-good/10" : "bg-status-critical/10")}>
+      {ok ? "✓ " : "✕ "}
+      To detect this change you need about <strong>{n(required)}</strong> per arm (95% confidence, 80% power). Your
+      window gives about <strong>{n(expected)}</strong>.
+      {!ok && (
+        <>
+          {" "}
+          This test can&apos;t reach significance as planned
+          {days ? <>: run it for ~{n(days)} days, split closer to 50/50, or target a bigger change.</> : ". Target a bigger change or add traffic."}
+        </>
+      )}
+    </p>
   )
 }

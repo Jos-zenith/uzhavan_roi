@@ -44,6 +44,38 @@ export function moments(xs: number[]): Moments {
   return { n, mean, variance }
 }
 
+/**
+ * Holm–Bonferroni adjusted p-values (same order as the input). Controls the
+ * chance of any false win across a feature's KPIs at α, which testing each
+ * KPI separately at 0.05 does not.
+ */
+export function holm(pValues: (number | null)[]): (number | null)[] {
+  const indexed = pValues.map((p, i) => ({ p, i })).filter((x): x is { p: number; i: number } => x.p !== null)
+  indexed.sort((a, b) => a.p - b.p)
+  const m = indexed.length
+  const adjusted: (number | null)[] = pValues.map(() => null)
+  let running = 0
+  indexed.forEach(({ p, i }, rank) => {
+    running = Math.max(running, Math.min(1, (m - rank) * p))
+    adjusted[i] = running
+  })
+  return adjusted
+}
+
+/**
+ * Sample-ratio-mismatch check: chi-square (1 df) on how many users landed in
+ * each arm vs the planned split. A tiny p-value means assignment or logging is
+ * broken, and no KPI comparison from that test can be trusted.
+ */
+export function srmPValue(control: number, treatment: number, treatmentShare: number): number | null {
+  const n = control + treatment
+  if (n === 0 || treatmentShare <= 0 || treatmentShare >= 1) return null
+  const eT = n * treatmentShare
+  const eC = n - eT
+  const chi2 = (treatment - eT) ** 2 / eT + (control - eC) ** 2 / eC
+  return 2 * (1 - normalCdf(Math.sqrt(chi2)))
+}
+
 /** Welch's test on means, using the normal approximation (fine for n ≳ 30). */
 export function welch(a: Moments, b: Moments): TestResult | null {
   if (a.n < 2 || b.n < 2) return null

@@ -221,11 +221,14 @@ const METHODS: [string, string, string][] = [
 
 const RULES: [string, string][] = [
   ['Confidence level', 'Two-sided tests at 95% confidence: an effect counts only if p < 0.05, whichever direction it goes. A 95% interval on the difference is shown next to every result.'],
-  ['Several KPIs, one feature', 'p-values are Holm-corrected across a feature’s KPIs, so checking three KPIs doesn’t triple the chance of a false win. Reports show the adjusted p, with the raw one beside it.'],
+  ['Watch live, still honest', 'Every KPI also gets an always-valid sequential p-value (mSPRT). In our simulation of A/A tests checked 50 times each, the ordinary test declared a false win 32% of the time; mSPRT, 1.5%. That’s what lets the dashboard stream results, and lets a clear win be called before the window closes.'],
+  ['Several KPIs, one feature', 'Primary KPIs are Holm-corrected together, so checking three doesn’t triple the chance of a false win. Reports show the adjusted p, with the raw one beside it.'],
+  ['Guardrails and the kill switch', 'A feature can name up to two guardrail KPIs, such as payment failures, that must not get worse. They are re-tested with the sequential test on every batch of events; significant harm turns the feature off for everyone and opens an incident.'],
+  ['Seasons', 'When a feature can’t be A/B tested, holdout districts go without it. The effect is the change where it launched minus the change in the holdout (difference-in-differences), so a harvest lift isn’t credited to the feature.'],
   ['Broken splits', 'A sample-ratio-mismatch check compares who landed in each arm with the planned split (chi-square, p < 0.001). If it fails, no result from that test is trusted until assignment is fixed.'],
   ['Can the test succeed?', 'At spec time, a power calculation (95% confidence, 80% power) compares the sample the target change needs with what the traffic and window will deliver. If the window can’t get there, the spec can’t be approved.'],
   ['Minimum sample', 'Set per feature in its spec (policy floor: 100 per arm). Below it, the verdict is “keep measuring”, with a projected date from the traffic so far.'],
-  ['Observation window', 'Set per feature (policy floor: 14 days). Nothing is final before it closes. Results aren’t checked for early stopping, so looking early can’t bias them.'],
+  ['Observation window', 'Set per feature (policy floor: 14 days). The verdict is final when it closes, or earlier if every primary KPI is already conclusive under the sequential test.'],
 ]
 
 const PRIVACY: [string, string][] = [
@@ -239,16 +242,17 @@ const RURAL: [string, string][] = [
   ['Works offline', 'Events queue on the phone, survive reloads and app restarts, and go out when the signal returns. Try it on the live demo with “No signal”.'],
   ['Small on the wire', 'Batches are gzip-compressed: a typical 20-event batch goes from about 7 KB to under 1 KB. Events are batched, not sent one per tap.'],
   ['Safe to retry', 'Every event has a client-generated id, and ingest de-duplicates, so a flaky 2G retry never double-counts a farmer.'],
+  ['Late is fine', 'Each event carries the time it happened and the time it arrived. Analytics uses the first, so a phone that syncs a day late still lands its events in the right day and the right group. The portfolio counts late arrivals.'],
 ]
 
 const LIMITS: [string, string][] = [
   [
-    'Pre/post can’t see seasons',
-    'Mandi price alerts has no holdout, so a harvest-season lift and a feature lift look the same. The spec form steers teams to A/B tests or phased rollouts for this reason.',
+    'Holdouts only cover rates',
+    'The seasonal (difference-in-differences) adjustment is built for rate KPIs. Other KPI types in a pre/post test still compare before and after directly.',
   ],
   [
     '₹ values are estimates',
-    'Every ₹ value must name its source, and each report shows ROI at 50%, 100% and 150% of it plus the break-even point. But the figures still come from the spec author and analytics, not an audited finance system.',
+    'Every ₹ value names its source, carries a low–high range, and needs finance sign-off; reports show ROI across that range and the break-even ₹ per unit. The figures are still estimates, not an audited finance system.',
   ],
   [
     'Averages can’t be sized yet',

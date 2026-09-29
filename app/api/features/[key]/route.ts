@@ -30,7 +30,7 @@ export async function GET(_req: Request, { params }: Ctx) {
 const patchInput = z.discriminatedUnion("op", [
   z.object({
     op: z.literal("approve"),
-    role: z.enum(["product", "engineering", "analytics"]),
+    role: z.enum(["product", "engineering", "analytics", "finance"]),
     approved: z.boolean(),
     by: z.string().trim().min(2, "Sign-off needs the name of the person approving").max(80),
   }),
@@ -106,6 +106,24 @@ export async function PATCH(req: Request, { params }: Ctx) {
   if (feature.status !== "SHIPPED") {
     return NextResponse.json({ error: "Only shipped features go through portfolio review" }, { status: 409 })
   }
+  // Close the loop: a decision becomes work for someone, not a line in the minutes.
+  const report = await buildReport(feature)
+  const savings = report.monthlyCost - report.monthlyBenefit
+  const ticket =
+    body.decision === "SCALE"
+      ? {
+          kind: "ROADMAP",
+          title: `Roll out ${feature.name} to everyone in scope`,
+          body: `Scale decision. ${report.recommendation.reason}${body.note ? ` ${body.note}` : ""}`,
+        }
+      : body.decision === "RETIRE"
+        ? {
+            kind: "REMOVAL",
+            title: `Remove ${feature.name}`,
+            body: `Retire decision. ${report.recommendation.reason} Turn off the flag, then delete the code and stop the monthly costs.${body.note ? ` ${body.note}` : ""}`,
+            monthlySavings: Math.max(0, savings),
+          }
+        : null
   await db.feature.update({
     where: { id: feature.id },
     data: {
@@ -120,7 +138,8 @@ export async function PATCH(req: Request, { params }: Ctx) {
           body: `${body.decision.charAt(0)}${body.decision.slice(1).toLowerCase()}.${body.note ? ` ${body.note}` : ""}`,
         },
       },
+      ...(ticket ? { tickets: { create: ticket } } : {}),
     },
   })
-  return NextResponse.json({ ok: true })
+  return NextResponse.json({ ok: true, ticket: ticket?.kind ?? null })
 }

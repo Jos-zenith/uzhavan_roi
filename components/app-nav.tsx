@@ -21,7 +21,7 @@ export function AppNav() {
         <Link href="/" className="flex items-baseline gap-2">
           <BookOpenText className="h-5 w-5 self-center text-primary" aria-hidden />
           <span className="font-serif text-lg font-semibold">Impact Ledger</span>
-          <span className="text-xs text-muted-foreground">Uzhavan · TN IMPACT 26</span>
+          <span className="text-xs text-muted-foreground">feature ROI, measured honestly</span>
         </Link>
         <nav className="flex flex-wrap gap-1 text-sm">
           {LINKS.map((l) => {

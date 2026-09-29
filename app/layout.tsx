@@ -9,8 +9,8 @@ const plexMono = IBM_Plex_Mono({ subsets: ["latin"], weight: ["400", "500"], var
 const serif = Source_Serif_4({ subsets: ["latin"], weight: ["400", "600"], variable: "--font-source-serif" })
 
 export const metadata: Metadata = {
-  title: "Impact Ledger · TN IMPACT 26",
-  description: "What every feature cost, what it proved, and what we decided — for the Uzhavan farmer app.",
+  title: "Impact Ledger",
+  description: "What every feature cost, what it proved, and what we decided: feature ROI with honest statistics.",
   icons: {
     icon: [
       { url: "/icon-light-32x32.png", media: "(prefers-color-scheme: light)" },

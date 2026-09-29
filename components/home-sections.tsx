@@ -9,11 +9,10 @@ import { Button } from "@/components/ui/button"
 export function Intro() {
   return (
     <p className="max-w-3xl text-sm leading-relaxed text-muted-foreground">
-      <span className="font-medium text-foreground">Impact Ledger</span> is a TN IMPACT 26 build for problem TNI26073:
-      teams ship features without knowing whether they paid off. The data here is an{" "}
-      <span className="text-foreground">illustrative scenario</span> for Uzhavan, Tamil Nadu&apos;s app for farmers
-      (inputs, subsidies, market prices). The features, costs and results are invented to show the process. They are
-      not real Uzhavan data.
+      <span className="font-medium text-foreground">Impact Ledger</span> exists because teams ship features without
+      knowing whether they paid off. The data here is an <span className="text-foreground">illustrative scenario</span>:
+      Vayal (வயல், &ldquo;field&rdquo;), a fictional farmer app for inputs, subsidies and market prices in Tamil Nadu.
+      Every feature, cost and result is invented to show the process.
     </p>
   )
 }
@@ -100,7 +99,7 @@ export function FeaturedStory({
           </Button>
         </div>
         <ul className="space-y-3">
-          {report.kpis.map((k) => (
+          {report.kpis.filter((k) => k.role === "PRIMARY").map((k) => (
             <li key={k.key} className="rounded-xl bg-background p-4">
               <div className="mb-2 flex items-center gap-2 text-sm font-medium">
                 <KpiIcon category={k.category} className="h-6 w-6" />

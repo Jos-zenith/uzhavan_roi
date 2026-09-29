@@ -12,8 +12,8 @@ export default function DemoPage() {
         <h1 className="text-2xl">Be a user in a live A/B test</h1>
         <p className="mt-1 max-w-3xl text-muted-foreground">
           The portfolio is the view from the review meeting. This page is the other end of the pipe. You&apos;re
-          dropped into the <code className="font-mono text-sm">one_tap_reorder</code> test on a mock Uzhavan reorder
-          screen, and every tap goes through the real SDK into the same database the{" "}
+          dropped into the <code className="font-mono text-sm">one_tap_reorder</code> test on the reorder screen of Vayal, a mock farmer
+          app, and every tap goes through the real SDK into the same database the{" "}
           <Link href="/features/one_tap_reorder" className="text-primary hover:underline">
             feature report
           </Link>{" "}

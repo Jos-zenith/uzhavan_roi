@@ -31,7 +31,7 @@ export const telemetryEventSchema = z
       .describe("Event contract version. Omitted = 1, so producers that predate versioning keep working."),
     eventId: z.string().min(8).max(64).describe("Client-generated unique id; retries with the same id are de-duplicated."),
     timestamp: z.iso.datetime().describe("When the action happened, ISO 8601 UTC."),
-    app: z.string().min(1).max(64).describe("Product that emitted the event, e.g. uzhavan."),
+    app: z.string().min(1).max(64).describe("Product that emitted the event, e.g. vayal."),
     release: z.string().min(1).max(32).describe("App version that emitted the event."),
     userId: z.string().min(1).max(128).describe("Stable pseudonymous user id."),
     sessionId: z.string().min(1).max(128).describe("Session the action happened in."),

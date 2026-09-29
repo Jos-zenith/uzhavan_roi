@@ -76,6 +76,52 @@ export function srmPValue(control: number, treatment: number, treatmentShare: nu
   return 2 * (1 - normalCdf(Math.sqrt(chi2)))
 }
 
+/**
+ * Always-valid p-value from a mixture sequential probability ratio test
+ * (mSPRT; Johari et al., "Always Valid Inference", 2017), using the normal
+ * approximation to the difference estimate. With a N(0, τ²) mixing prior on
+ * the true difference, the likelihood ratio after observing an estimate θ̂ with
+ * variance V is
+ *
+ *   Λ = √(V / (V + τ²)) · exp( θ̂² τ² / (2 V (V + τ²)) )
+ *
+ * and p = min(1, 1/Λ) stays valid no matter how often, or when, anyone looks.
+ * That is what makes a live dashboard honest: peeking can't manufacture a win.
+ * (The running minimum over looks would be slightly smaller; using the current
+ * look only is conservative.) τ is set to the effect the spec cares about.
+ */
+export function msprtPValue(diff: number, se: number, tau: number): number | null {
+  if (!(se > 0) || !(tau > 0)) return null
+  const v = se * se
+  const t2 = tau * tau
+  const logLambda = 0.5 * Math.log(v / (v + t2)) + (diff * diff * t2) / (2 * v * (v + t2))
+  return Math.min(1, Math.exp(-logLambda))
+}
+
+/**
+ * Difference-in-differences on proportions: (treated after − treated before)
+ * − (holdout after − holdout before). The holdout soaks up what would have
+ * happened anyway, such as a harvest-season lift, so only the feature's own
+ * effect remains.
+ */
+export function diffInDiffProportions(
+  cells: { tBefore: [number, number]; tAfter: [number, number]; hBefore: [number, number]; hAfter: [number, number] }, // [successes, n]
+): (TestResult & { treatedChange: number; holdoutChange: number }) | null {
+  const rate = ([x, n]: [number, number]) => (n > 0 ? x / n : NaN)
+  const variance = ([x, n]: [number, number]) => {
+    const p = x / n
+    return (p * (1 - p)) / n
+  }
+  const all = [cells.tBefore, cells.tAfter, cells.hBefore, cells.hAfter]
+  if (all.some(([, n]) => n === 0)) return null
+  const treatedChange = rate(cells.tAfter) - rate(cells.tBefore)
+  const holdoutChange = rate(cells.hAfter) - rate(cells.hBefore)
+  const diff = treatedChange - holdoutChange
+  const se = Math.sqrt(all.reduce((a, c) => a + variance(c), 0))
+  const r = result(diff, se, se)
+  return r ? { ...r, treatedChange, holdoutChange } : null
+}
+
 /** Welch's test on means, using the normal approximation (fine for n ≳ 30). */
 export function welch(a: Moments, b: Moments): TestResult | null {
   if (a.n < 2 || b.n < 2) return null

@@ -3,6 +3,7 @@
 import Link from "next/link"
 import { useEffect, useRef, useState } from "react"
 import { cn } from "@/lib/utils"
+import { ResetDemo } from "@/components/reset-demo"
 
 export type PipelineSnapshot = {
   total: number
@@ -11,6 +12,7 @@ export type PipelineSnapshot = {
   quarantinedFlags: number
   activeFlags7d: number
   lastReceivedAt: string | null
+  lateArrivals7d: number
 }
 
 const POLL_MS = 5000
@@ -87,14 +89,18 @@ export function LivePipeline({ initial, schemaVersion }: { initial: PipelineSnap
         <span className={p.quarantinedEvents > 0 ? "text-foreground" : undefined}>
           {p.quarantinedEvents} quarantined ({p.quarantinedFlags} {p.quarantinedFlags === 1 ? "flag" : "flags"})
         </span>
+        <span title="Events that arrived an hour or more after they happened (offline phones). Analytics uses event time.">
+          {p.lateArrivals7d.toLocaleString("en-IN")} arrived late (7d)
+        </span>
         <span>last event {ago(p.lastReceivedAt, clock)}</span>
         <span>schema v{schemaVersion}</span>
       </div>
-      <span>
-        seeded demo data ·{" "}
+      <span className="flex flex-wrap items-center gap-x-2">
+        seeded demo data ·
         <Link href="/demo" className="text-primary hover:underline">
           add real events →
         </Link>
+        · <ResetDemo />
       </span>
     </section>
   )

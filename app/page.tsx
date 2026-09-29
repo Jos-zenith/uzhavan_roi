@@ -2,6 +2,9 @@ import Link from "next/link"
 import { AlertTriangle, CalendarClock, Plus, ShieldAlert } from "lucide-react"
 import { briefing, longDate, money } from "@/lib/narrative"
 import { EmptyState, FeaturedStory, HowItWorks, Intro } from "@/components/home-sections"
+import { LivePulse } from "@/components/live-pulse"
+import { CloseTheLoop } from "@/components/close-the-loop"
+import { liveSnapshot } from "@/lib/live"
 import { cn } from "@/lib/utils"
 import { db } from "@/lib/db"
 import { buildReport, featureWithSpec, type KpiResult } from "@/lib/analytics/report"
@@ -29,11 +32,13 @@ export const dynamic = "force-dynamic"
 export default async function PortfolioPage() {
   const features = await db.feature.findMany({ ...featureWithSpec, orderBy: { createdAt: "asc" } })
   if (features.length === 0) return <EmptyState />
-  const [rows, pipeline, unregistered, decisions] = await Promise.all([
+  const [rows, pipeline, unregistered, decisions, liveNow, tickets] = await Promise.all([
     Promise.all(features.map(async (f) => ({ f, report: await buildReport(f), gate: await gateFor(f) }))),
     pipelineStatus(),
     quarantinedFlags(),
     db.reviewNote.findMany({ where: { kind: "DECISION" }, orderBy: { createdAt: "asc" }, select: { featureId: true, author: true } }),
+    liveSnapshot(),
+    db.ticket.findMany({ orderBy: { createdAt: "desc" }, take: 6, include: { feature: { select: { key: true, name: true } } } }),
   ])
   // Latest decision author per feature (later entries overwrite earlier ones).
   const decidedBy = new Map(decisions.map((d) => [d.featureId, d.author]))
@@ -47,6 +52,16 @@ export default async function PortfolioPage() {
   const worst = [...credibleRows].sort((a, b) => a.report.totalBenefit - a.report.totalCost - (b.report.totalBenefit - b.report.totalCost))[0]
   // The strongest proven result tells the method's story in one example.
   const featured = [...credibleRows].filter((r) => (r.report.roi ?? 0) > 0).sort((a, b) => b.report.roi! - a.report.roi!)[0]
+  // Live countdowns: when each running test becomes decidable, from its report.
+  const countdowns = Object.fromEntries(
+    rows.map(({ f, report }) => [f.key, { credibleOn: report.credible ? new Date().toISOString() : (report.credibility.credibleOn?.toISOString() ?? null), verdict: report.recommendation.kind }]),
+  )
+  // Forecast: retire the two live features losing the most on proven results.
+  const forecast = rows
+    .filter(({ f, report }) => f.status === "SHIPPED" && report.credible && report.monthlyCost - report.monthlyBenefit > 0 && (report.roi ?? 0) < 0)
+    .map(({ f, report }) => ({ key: f.key, name: f.name, monthlySaving: report.monthlyCost - report.monthlyBenefit, roi: report.roi ?? 0 }))
+    .sort((a, b) => a.roi - b.roi)
+    .slice(0, 2)
   const brief = briefing(
     rows.map((r) => ({ ...r, review: reviewStatus(r.f, r.report.credible) })),
     unregistered,
@@ -79,11 +94,7 @@ export default async function PortfolioPage() {
         </p>
       </section>
 
-      {featured && <FeaturedStory feature={featured.f} report={featured.report} />}
-
-      <Intro />
-
-      <HowItWorks />
+      <LivePulse initial={liveNow} countdowns={countdowns} />
 
       {brief.items.length > 0 && (
         <section className="space-y-3">
@@ -130,6 +141,14 @@ export default async function PortfolioPage() {
           </ul>
         </section>
       )}
+
+      {featured && <FeaturedStory feature={featured.f} report={featured.report} />}
+
+      <CloseTheLoop forecast={forecast} tickets={tickets} />
+
+      <Intro />
+
+      <HowItWorks />
 
       <h2 className="border-t border-border pt-8 text-xl">The numbers behind it</h2>
 

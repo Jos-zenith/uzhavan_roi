@@ -53,7 +53,10 @@ function summarise(status: number | null, body: unknown): string {
     return `${b.error ?? "rejected"}${issue ? ` · ${where ? `${where}: ` : ""}${issue.message}${more}` : ""}`
   }
   const q = Array.isArray(b.quarantinedFlags) && b.quarantinedFlags.length ? ` (${b.quarantinedFlags.join(", ")})` : ""
-  return `accepted ${b.accepted} · quarantined ${b.quarantined}${q} · duplicates ${b.duplicates}`
+  const kill = Array.isArray(b.killSwitch) && b.killSwitch.length
+    ? ` · KILL SWITCH: ${(b.killSwitch as { key: string }[]).map((k) => k.key).join(", ")} turned off for everyone`
+    : ""
+  return `accepted ${b.accepted} · quarantined ${b.quarantined}${q} · duplicates ${b.duplicates}${kill}`
 }
 
 const time = (d: Date) => d.toTimeString().slice(0, 8)
@@ -92,7 +95,7 @@ export function ReorderDemo() {
       telemetry.current ??
       createTelemetry({
         endpoint: "/api/events",
-        app: "uzhavan",
+        app: "vayal",
         release: "4.2.0",
         flushIntervalMs: 1500,
         requireConsent: true,
@@ -162,7 +165,7 @@ export function ReorderDemo() {
     schemaVersion: EVENT_SCHEMA_VERSION,
     eventId: newId(),
     timestamp: new Date().toISOString(),
-    app: "uzhavan",
+    app: "vayal",
     release: "4.2.0",
     userId: userId ?? "demo",
     sessionId: "fault-injection",
@@ -181,7 +184,7 @@ export function ReorderDemo() {
         {/* Phone mock */}
         <div className="mx-auto w-full max-w-[360px] rounded-[2rem] border-4 border-secondary bg-card p-5 shadow-xl">
           <div className="mb-4 flex items-center justify-between text-xs text-muted-foreground">
-            <span>Uzhavan · Inputs</span>
+            <span>Vayal · Inputs</span>
             <span className="font-mono">{variant ?? "assigning…"}</span>
           </div>
 
@@ -373,6 +376,31 @@ export function ReorderDemo() {
               <Button
                 variant="outline"
                 size="sm"
+                className="border-status-critical/50"
+                onClick={() => {
+                  // 25 new treatment farmers in the UPI autopay test whose payment fails. The ingest API
+                  // re-tests the guardrail on this batch; a couple of clicks pushes it past the line.
+                  const batch = newId().slice(0, 6)
+                  const events = Array.from({ length: 25 }, (_, i) => {
+                    const farmer = `spike-${batch}-${i}`
+                    return ["session_started", "feature_exposed", "checkout_started", "payment_failed"].map((action) => ({
+                      ...base(),
+                      userId: farmer,
+                      sessionId: `${farmer}-s1`,
+                      featureFlag: "upi_autopay",
+                      variant: "treatment",
+                      action,
+                      context: { district: "Villupuram" },
+                    }))
+                  }).flat()
+                  void inject("25 failed UPI payments", events)
+                }}
+              >
+                Spike UPI payment failures
+              </Button>
+              <Button
+                variant="outline"
+                size="sm"
                 disabled={lastBatch.current.length === 0}
                 onClick={() => inject(`replay last batch (${lastBatch.current.length})`, lastBatch.current)}
               >
@@ -381,6 +409,8 @@ export function ReorderDemo() {
             </div>
             <p className="text-xs text-muted-foreground">
               The unregistered flag lands in quarantine and shows up under &ldquo;Needs you&rdquo; on the portfolio.
+              Spiking UPI failures a couple of times trips that test&apos;s guardrail: watch the kill switch fire here, then
+              find the incident on the portfolio.
             </p>
           </div>
         </div>
@@ -389,7 +419,7 @@ export function ReorderDemo() {
       {/* Console */}
       <div className="overflow-hidden terminal rounded-xl border border-border">
         <div className="flex items-center justify-between border-b border-border px-4 py-2 font-mono text-xs text-muted-foreground">
-          <span>ingest console · uzhavan@4.2.0 → /api/events</span>
+          <span>ingest console · vayal@4.2.0 → /api/events</span>
           <button type="button" className="hover:text-foreground" onClick={() => setLines([])}>
             clear
           </button>

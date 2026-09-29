@@ -1,6 +1,7 @@
 import { NextResponse } from "next/server"
 import { db } from "@/lib/db"
 import { registeredFlags, releaseQuarantine } from "@/lib/registry"
+import { evaluateGuardrails } from "@/lib/guardrails"
 import { ingestBatchSchema } from "@/lib/telemetry/schema"
 
 const MAX_BODY_BYTES = 2 * 1024 * 1024 // after decompression
@@ -71,10 +72,14 @@ export async function POST(req: Request) {
     await Promise.all([...nowRegistered].map(releaseQuarantine))
   }
 
+  // Real-time guardrails: re-test the flags this batch touched, and kill any that are doing harm.
+  const killed = await evaluateGuardrails(fresh.map((e) => e.featureFlag).filter((f): f is string => !!f && registered.has(f)))
+
   return NextResponse.json({
     accepted: fresh.length,
     quarantined: fresh.filter((e) => isQuarantined(e.featureFlag)).length,
     quarantinedFlags,
     duplicates: events.length - fresh.length,
+    ...(killed.length > 0 ? { killSwitch: killed } : {}),
   })
 }

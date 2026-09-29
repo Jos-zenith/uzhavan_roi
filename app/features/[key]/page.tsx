@@ -1,3 +1,4 @@
+import { OctagonX } from "lucide-react"
 import Link from "next/link"
 import { notFound } from "next/navigation"
 import { db } from "@/lib/db"
@@ -81,6 +82,22 @@ export default async function FeaturePage({
         </p>
       </section>
 
+      {report.killed && (
+        <div className="flex items-start gap-3 rounded-xl border-2 border-status-critical/50 bg-status-critical/10 px-4 py-3">
+          <OctagonX className="mt-0.5 h-5 w-5 shrink-0 text-status-critical" aria-hidden />
+          <div className="text-sm">
+            <p className="font-medium">
+              Killed by its guardrail on {longDate(report.killed.at)}, {report.killed.at.toISOString().slice(11, 16)} UTC
+            </p>
+            <p className="text-muted-foreground">{report.killed.reason}</p>
+            <p className="mt-1 text-xs text-muted-foreground">
+              The flag endpoint (<code className="font-mono">/api/flags</code>) now serves control to everyone. An incident
+              ticket is open.
+            </p>
+          </div>
+        </div>
+      )}
+
       {recovered > 0 && (
         <p className="rounded-xl border border-status-good/40 bg-status-good/10 px-4 py-3 text-sm">
           ✓ Spec registered. <strong>{recovered.toLocaleString("en-IN")} quarantined events</strong> for{" "}
@@ -149,7 +166,7 @@ export default async function FeaturePage({
         </section>
       )}
 
-      {live && !report.credible && <Countdown f={f} report={report} />}
+      {live && !report.credible && rec.kind !== "KILLED" && <Countdown f={f} report={report} />}
 
       {/* KPI results */}
       <section className="space-y-3">
@@ -163,8 +180,11 @@ export default async function FeaturePage({
                 <th className="px-4 py-3 text-right font-medium">{report.armLabels[0]}</th>
                 <th className="px-4 py-3 text-right font-medium">{report.armLabels[1]}</th>
                 <th className="px-4 py-3 text-right font-medium">Change (95% CI)</th>
-                <th className="px-4 py-3 text-right font-medium" title="Holm-adjusted across this feature's KPIs">
+                <th className="px-4 py-3 text-right font-medium" title="Final-verdict test, Holm-adjusted across the primary KPIs">
                   p (Holm)
+                </th>
+                <th className="px-4 py-3 text-right font-medium" title="Always-valid sequential test (mSPRT): safe to watch live">
+                  p (live)
                 </th>
                 <th className="px-4 py-3 font-medium">Result</th>
                 <th className="px-4 py-3 text-right font-medium">₹ / month</th>
@@ -179,7 +199,14 @@ export default async function FeaturePage({
                       <div className="flex gap-3">
                         <KpiIcon category={k.category} />
                         <div>
-                          <div className="font-medium">{k.name}</div>
+                          <div className="font-medium">
+                            {k.name}
+                            {k.role === "GUARDRAIL" && (
+                              <span className="ml-2 rounded border border-border px-1.5 py-px align-middle font-mono text-[10px] uppercase tracking-wide text-muted-foreground">
+                                guardrail
+                              </span>
+                            )}
+                          </div>
                           <div className="text-xs text-muted-foreground">{k.direction === "UP" ? "higher is better" : "lower is better"}</div>
                           {kpiDefs.get(k.key) && (
                             <div className="mt-1 font-mono text-[11px] leading-4 text-muted-foreground" title={kpiFormula(kpiDefs.get(k.key)!).test}>
@@ -202,6 +229,12 @@ export default async function FeaturePage({
                           {formatKpiDelta(k.ciLow, k.unit)} … {formatKpiDelta(k.ciHigh, k.unit)}
                         </div>
                       )}
+                      {k.seasonal && (
+                        <div className="mt-1 max-w-52 text-left text-xs text-muted-foreground">
+                          alert districts {formatKpiDelta(k.seasonal.treatedChange, k.unit)}, holdout ({k.seasonal.holdoutDistricts.join(", ")}){" "}
+                          {formatKpiDelta(k.seasonal.holdoutChange, k.unit)}: the difference is the feature
+                        </div>
+                      )}
                     </td>
                     <td
                       className="px-4 py-3 text-right font-mono tabular-nums"
@@ -212,9 +245,16 @@ export default async function FeaturePage({
                         <div className="text-xs text-muted-foreground">raw {fmtP(k.pValue)}</div>
                       )}
                     </td>
+                    <td className="px-4 py-3 text-right font-mono tabular-nums">{fmtP(k.pSequential)}</td>
                     <td className="px-4 py-3 text-xs">
                       {!live ? (
                         <span className="text-muted-foreground">not live</span>
+                      ) : k.role === "GUARDRAIL" ? (
+                        k.tripped ? (
+                          <span className="font-medium text-status-critical">✕ harm detected: kill switch</span>
+                        ) : (
+                          <span className="text-status-good">✓ no harm detected</span>
+                        )
                       ) : worse ? (
                         <span className="text-status-critical">✕ significantly worse</span>
                       ) : k.targetMet ? (
@@ -233,7 +273,16 @@ export default async function FeaturePage({
                         </span>
                       )}
                     </td>
-                    <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums">{live ? formatInr(k.monthlyBenefit) : "—"}</td>
+                    <td className="whitespace-nowrap px-4 py-3 text-right font-mono tabular-nums">
+                      {live ? formatInr(k.monthlyBenefit) : "—"}
+                      {k.breakEvenValue !== null && (
+                        <div className="whitespace-normal font-sans text-xs text-muted-foreground" title="₹ per unit this KPI would need to be worth for the feature to break even, others as assumed">
+                          {k.breakEvenValue < 0.005
+                            ? "pays back even at ₹0 per unit"
+                            : `breaks even at ₹${k.breakEvenValue.toFixed(k.breakEvenValue < 10 ? 2 : 0)}/unit (assumed ₹${k.valuePerUnit})`}
+                        </div>
+                      )}
+                    </td>
                   </tr>
                 )
               })}
@@ -286,12 +335,22 @@ export default async function FeaturePage({
                 <dd>{Math.round(f.treatmentShare * 100)}% treatment</dd>
               </>
             )}
+            {f.holdoutDistricts && (
+              <>
+                <dt className="text-muted-foreground">Holdout</dt>
+                <dd>{f.holdoutDistricts.split(",").join(", ")}: no alerts, to measure the season</dd>
+              </>
+            )}
             <dt className="text-muted-foreground">₹ sources</dt>
             <dd>
               <ul className="space-y-1">
                 {f.kpis.map((k) => (
                   <li key={k.id}>
-                    <span className="font-mono text-xs">₹{k.valuePerUnit}</span> per unit of {k.kpi.name.toLowerCase()}:{" "}
+                    <span className="font-mono text-xs">
+                      ₹{k.valuePerUnit}
+                      {k.valueLow !== null && k.valueHigh !== null && ` (₹${k.valueLow}–₹${k.valueHigh})`}
+                    </span>{" "}
+                    per unit of {k.kpi.name.toLowerCase()}:{" "}
                     {k.valueSource ? (
                       <span className="text-muted-foreground">{k.valueSource}</span>
                     ) : (
@@ -317,6 +376,7 @@ export default async function FeaturePage({
                 product: { ok: f.productApproved, by: f.productApprovedBy },
                 engineering: { ok: f.engineeringApproved, by: f.engineeringApprovedBy },
                 analytics: { ok: f.analyticsApproved, by: f.analyticsApprovedBy },
+                finance: { ok: f.financeApproved, by: f.financeApprovedBy },
               }}
             />
           </div>
@@ -458,17 +518,18 @@ const fmtP = (p: number | null) => (p === null ? "—" : p < 0.001 ? "<0.001" : 
 
 const verdictAt = (roi: number | null) => (roi === null ? "—" : roi >= 0.5 ? "scale" : roi >= 0 ? "iterate" : "retire")
 
-/** ROI if the spec's ₹ values are off by half either way, and where it breaks even. */
+/** ROI as a band: every ₹ value at its low, assumed and high estimate, and where it breaks even. */
 function Sensitivity({ rows, breakEven, credible }: { rows: FeatureReport["sensitivity"]; breakEven: number | null; credible: boolean }) {
   if (rows.every((r) => r.roi === null)) return null
   const fragile = breakEven !== null && breakEven > 0.8
+  const label = { low: "low ₹ estimates", base: "as assumed", high: "high ₹ estimates" } as const
   return (
     <div className="mt-4 rounded-lg bg-background p-3 text-sm">
-      <p className="mb-2 text-xs text-muted-foreground">If the ₹ values in the spec are wrong</p>
+      <p className="mb-2 text-xs text-muted-foreground">Return on cost across the finance-approved ₹ range</p>
       <div className="grid grid-cols-3 gap-2">
         {rows.map((r) => (
-          <div key={r.factor} className={cn("rounded-md p-2", r.factor === 1 && "bg-card")}>
-            <div className="text-xs text-muted-foreground">{r.factor === 1 ? "as assumed" : `${r.factor * 100}% of assumed`}</div>
+          <div key={r.label} className={cn("rounded-md p-2", r.label === "base" && "bg-card")}>
+            <div className="text-xs text-muted-foreground">{label[r.label]}</div>
             <div className="font-mono text-base">{formatPct(r.roi)}</div>
             {credible && <div className="text-xs text-muted-foreground">would be: {verdictAt(r.roi)}</div>}
           </div>
@@ -479,7 +540,7 @@ function Sensitivity({ rows, breakEven, credible }: { rows: FeatureReport["sensi
           ? "No proven value, so no ₹ assumption can make this pay back."
           : breakEven > 1
             ? `Would only break even if the ₹ values were ${(breakEven * 100).toFixed(0)}% of what's assumed.`
-            : `Breaks even if the ₹ values are at least ${(breakEven * 100).toFixed(0)}% of what's assumed.${fragile ? " That's fragile: a small misestimate flips the verdict, so check the sources below." : " Robust to a large misestimate."}`}
+            : `Breaks even if the ₹ values are at least ${(breakEven * 100).toFixed(0)}% of what's assumed.${fragile ? " That's fragile: a small misestimate flips the verdict." : " Robust to a large misestimate."}`}
       </p>
     </div>
   )
@@ -490,7 +551,7 @@ function Countdown({ f, report }: { f: { observationDays: number; minSamplePerAr
   const { credibility: c } = report
   const smallest = report.kpis.length ? Math.min(...report.kpis.flatMap((k) => [k.control.n, k.treatment.n])) : 0
   const farOff = (d: Date | null) => d !== null && d.getTime() - Date.now() > 365 * 86_400_000
-  const unproven = report.kpis.filter((k) => !k.significant && k.power.required !== null)
+  const unproven = report.kpis.filter((k) => k.role === "PRIMARY" && !k.significant && k.power.required !== null)
   return (
     <section className="rounded-xl border border-border bg-card p-6">
       <p className="text-xs font-medium uppercase tracking-wide text-primary">When this becomes final</p>
@@ -618,10 +679,18 @@ function MethodNote(p: {
         </li>
         {p.holm && (
           <li>
-            <span className="text-foreground">Holm correction</span> across {p.kpis.length} KPIs, so testing several
+            <span className="text-foreground">Holm correction</span> across the primary KPIs, so testing several
             doesn&apos;t inflate the chance of a false win
           </li>
         )}
+        <li>
+          <span className="text-foreground">Live p-values are always-valid</span> (mSPRT): looking early can&apos;t fake a
+          win, so a clear result can be called before the window closes
+        </li>
+        <li>
+          <span className="text-foreground">Guardrails</span> are re-tested on every batch of events; significant harm
+          trips the kill switch
+        </li>
         {p.srm && (
           <li>
             Traffic split (SRM check): planned {Math.round(p.srm.expectedShare * 100)}% treatment, observed{" "}
@@ -660,7 +729,7 @@ function sdkSnippet(flag: string, method: AttributionMethod, actions: string[]) 
       : `t.expose("${flag}", assignVariant("${flag}", user.id, ${method === "AB_TEST" ? 50 : 20}))`
   return `import { createTelemetry, assignVariant } from "@/lib/telemetry/sdk"
 
-const t = createTelemetry({ endpoint: "/api/events", app: "uzhavan", release: APP_VERSION })
+const t = createTelemetry({ endpoint: "/api/events", app: "vayal", release: APP_VERSION })
 t.identify(user.id)
 ${assign}
 

@@ -6,7 +6,7 @@ import { EVENT_SCHEMA_VERSION } from "./version"
  * flagged feature and `track()` for the actions a KPI is built on; the SDK
  * fills in user, session, flag, variant, release and batching.
  *
- *   const t = createTelemetry({ endpoint: "/api/events", app: "uzhavan", release: "4.2.0", requireConsent: true })
+ *   const t = createTelemetry({ endpoint: "/api/events", app: "vayal", release: "4.2.0", requireConsent: true })
  *   t.setConsent(farmerAgreed)
  *   t.identify(farmerId)
  *   const variant = t.expose("one_tap_reorder", assignVariant("one_tap_reorder", farmerId, 50))

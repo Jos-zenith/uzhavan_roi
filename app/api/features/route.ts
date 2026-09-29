@@ -27,12 +27,18 @@ const specInput = z.object({
         monthlyVolume: z.number().finite().nonnegative(),
         valuePerUnit: z.number().finite().nonnegative(),
         valueSource: z.string().trim().max(200).default(""),
+        valueLow: z.number().finite().nonnegative().nullable().default(null),
+        valueHigh: z.number().finite().nonnegative().nullable().default(null),
+        role: z.enum(["PRIMARY", "GUARDRAIL"]).default("PRIMARY"),
       }),
     )
     .min(1, "Map at least one KPI")
-    .max(3, "At most 3 KPIs — pick the ones that matter"),
+    .max(5, "At most 5 KPIs: up to 3 primary and 2 guardrails")
+    .refine((ks) => { const n = ks.filter((k) => k.role === "PRIMARY").length; return n >= 1 && n <= 3 }, "1–3 primary KPIs: pick the ones that matter")
+    .refine((ks) => ks.filter((k) => k.role === "GUARDRAIL").length <= 2, "At most 2 guardrail KPIs"),
   attributionMethod: z.enum(ATTRIBUTION_METHODS),
   treatmentShare: z.number().min(0.01).max(0.99).default(0.5),
+  holdoutDistricts: z.string().max(200).default(""),
   segment: z.string().min(3).max(200),
   minSamplePerArm: z.number().int().positive(),
   observationDays: z.number().int().positive(),

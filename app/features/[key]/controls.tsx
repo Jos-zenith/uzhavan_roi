@@ -37,7 +37,7 @@ export function Approvals({
   editable,
 }: {
   featureKey: string
-  approvals: Record<"product" | "engineering" | "analytics", { ok: boolean; by: string | null }>
+  approvals: Record<"product" | "engineering" | "analytics" | "finance", { ok: boolean; by: string | null }>
   editable: boolean
 }) {
   const { send, pending, error } = useMutation(featureKey)

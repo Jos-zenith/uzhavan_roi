@@ -43,6 +43,11 @@ model Feature {
   attributionMethod   String // AB_TEST | PHASED_ROLLOUT | PRE_POST
   segment             String
   treatmentShare      Float     @default(0.5) // planned share of traffic in treatment
+  /// Pre/post only: comma-separated districts kept without the feature, to net out seasonality.
+  holdoutDistricts    String    @default("")
+  /// Set when a guardrail KPI trips the kill switch; the flag then serves control to everyone.
+  killedAt            DateTime?
+  killReason          String?
   minSamplePerArm     Int
   observationDays     Int
   horizonMonths       Int       @default(12)
@@ -54,6 +59,9 @@ model Feature {
   productApprovedBy     String?
   engineeringApprovedBy String?
   analyticsApprovedBy   String?
+  /// Finance signs off the ₹ values (and their low/high range), separately from the spec.
+  financeApproved       Boolean @default(false)
+  financeApprovedBy     String?
   releaseVersion      String?
   releasedAt          DateTime?
   decision            String? // SCALE | ITERATE | RETIRE
@@ -62,9 +70,27 @@ model Feature {
   createdAt           DateTime  @default(now())
   updatedAt           DateTime  @updatedAt
 
-  kpis  FeatureKpi[]
-  costs CostEntry[]
-  notes ReviewNote[]
+  kpis    FeatureKpi[]
+  costs   CostEntry[]
+  notes   ReviewNote[]
+  tickets Ticket[]
+}
+
+/// Where a decision goes next: a roadmap item for "scale", a removal ticket for
+/// "retire", an incident when a guardrail trips the kill switch.
+model Ticket {
+  id             String   @id @default(cuid())
+  featureId      String
+  kind           String // ROADMAP | REMOVAL | INCIDENT
+  title          String
+  body           String
+  monthlySavings Float? // removal tickets: run cost no longer paid, net of lost proven value
+  status         String   @default("OPEN")
+  createdAt      DateTime @default(now())
+
+  feature Feature @relation(fields: [featureId], references: [id], onDelete: Cascade)
+
+  @@index([createdAt])
 }
 
 /// The feature's review log: who said what, when. Decisions are recorded here
@@ -93,6 +119,9 @@ model FeatureKpi {
   monthlyVolume Float // units the KPI applies to per month at full rollout
   valuePerUnit  Float // ₹ per unit of improvement per volume unit
   valueSource   String @default("") // where the ₹ figure comes from; required by the spec gate
+  valueLow      Float? // pessimistic ₹ per unit; ROI is shown as a low–high band
+  valueHigh     Float? // optimistic ₹ per unit
+  role          String @default("PRIMARY") // PRIMARY (what the feature is for) | GUARDRAIL (must not get worse)
 
   feature Feature       @relation(fields: [featureId], references: [id], onDelete: Cascade)
   kpi     KpiDefinition @relation(fields: [kpiId], references: [id])

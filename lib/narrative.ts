@@ -29,15 +29,21 @@ function kpiNoun(k: KpiResult): string {
   return k.name.replace(/ per 1,000 users/i, "").toLowerCase()
 }
 
-/** "raised checkout conversion from 43.7% to 50.2%" — past participle, so it works after "has" too. */
-export function kpiClause(k: KpiResult): string {
+/**
+ * "raised checkout conversion from 43.7% to 50.2%". With `soFar`, each clause
+ * carries its own auxiliary ("has raised…", "hasn't measurably moved…") for a
+ * test that's still running.
+ */
+export function kpiClause(k: KpiResult, soFar = false): string {
   const from = value(k.control.value, k.unit)
   const to = value(k.treatment.value, k.unit)
   const per1k = k.unit === "PER_1K" ? " per 1,000 users" : ""
-  if (!k.significant || k.improvement === null) return `didn't measurably move ${kpiNoun(k)}`
+  if (!k.significant || k.improvement === null) {
+    return soFar ? `hasn't measurably moved ${kpiNoun(k)} yet` : `didn't measurably move ${kpiNoun(k)}`
+  }
   const up = (k.delta ?? 0) > 0
   const verb = k.improvement > 0 ? (up ? "raised" : "cut") : up ? "pushed up" : "lowered"
-  return `${verb} ${kpiNoun(k)} from ${from} to ${to}${per1k}`
+  return `${soFar ? "has " : ""}${verb} ${kpiNoun(k)} from ${from} to ${to}${per1k}`
 }
 
 function joinClauses(parts: string[]): string {
@@ -74,17 +80,39 @@ export function featureHeadline(
         }
   }
 
-  // Proven changes lead; "didn't measurably move" comes last.
-  const ordered = [...report.kpis].sort((a, b) => Number(b.significant) - Number(a.significant))
-  const clauses = joinClauses(ordered.map(kpiClause))
+  // A kill outranks everything else about the feature.
+  const tripped = report.kpis.filter((k) => k.tripped)
+  if (report.killed || tripped.length > 0) {
+    const what = joinClauses(
+      tripped.map((k) => `${kpiNoun(k)} rose from ${value(k.control.value, k.unit)} to ${value(k.treatment.value, k.unit)}`),
+    )
+    return {
+      headline: `${f.name} was switched off on day ${report.observedDays} by its guardrail${what ? `: ${what}` : ""}.`,
+      detail: "The kill switch served control to everyone automatically, no meeting required. An incident ticket is open.",
+    }
+  }
+
+  // Proven changes lead; "didn't measurably move" comes last. Guardrails get their own clause.
+  const ordered = report.kpis.filter((k) => k.role === "PRIMARY").sort((a, b) => Number(b.significant) - Number(a.significant))
+  const guards = report.kpis.filter((k) => k.role === "GUARDRAIL")
+  const guardNote = guards.length === 0 ? "" : `, while ${joinClauses(guards.map((k) => kpiNoun(k)))} held steady`
   const net = report.totalBenefit - report.totalCost
-  if (!report.windowMet && f.releasedAt) {
+  // Proven effects get a clause each; everything unproven shares one ("…or…").
+  const summarise = (soFar: boolean) => {
+    const proven = ordered.filter((k) => k.significant && k.improvement !== null).map((k) => kpiClause(k, soFar))
+    const flat = ordered.filter((k) => !k.significant || k.improvement === null).map((k) => kpiNoun(k))
+    const nouns = flat.length <= 1 ? (flat[0] ?? "") : `${flat.slice(0, -1).join(", ")} or ${flat.at(-1)}`
+    if (flat.length > 0) proven.push(soFar ? `hasn't measurably moved ${nouns} yet` : `didn't measurably move ${nouns}`)
+    return joinClauses(proven)
+  }
+  if (!report.credible && !report.windowMet && f.releasedAt) {
     const closes = new Date(f.releasedAt.getTime() + f.observationDays * 86_400_000)
     return {
-      headline: `${report.observedDays} days into a ${f.observationDays}-day test, ${f.name} has ${clauses}.`,
+      headline: `${report.observedDays} days into a ${f.observationDays}-day test, ${f.name} ${summarise(true)}${guardNote}.`,
       detail: `None of it counts until the window closes on ${longDate(closes)}. Early lifts often shrink.`,
     }
   }
+  const clauses = summarise(false) + guardNote
   const sentence = `${f.name} ${clauses}.`
   if (!report.sampleMet) return { headline: sentence, detail: "But one arm is below the minimum sample, so the result isn't final." }
   const roi = report.roi ?? 0
@@ -112,7 +140,8 @@ export function briefing(rows: Row[], quarantined: { flag: string; events: numbe
   const live = rows.filter((r) => r.f.status === "SHIPPED" || r.f.status === "RETIRED")
   const credible = live.filter((r) => r.report.credible && r.report.roi !== null)
   const best = [...credible].sort((a, b) => b.report.roi! - a.report.roi!)[0]
-  const worst = [...credible].sort((a, b) => a.report.totalBenefit - a.report.totalCost - (b.report.totalBenefit - b.report.totalCost))[0]
+  // Only still-running features are "on track to lose" anything; retired ones are already dealt with.
+  const worst = credible.filter((r) => r.f.status === "SHIPPED" && r.report.recommendation.kind !== "KILLED").sort((a, b) => a.report.totalBenefit - a.report.totalCost - (b.report.totalBenefit - b.report.totalCost))[0]
 
   const lines: string[] = []
   if (best && best.report.roi! > 0) {
@@ -132,6 +161,16 @@ export function briefing(rows: Row[], quarantined: { flag: string; events: numbe
   const items: AttentionItem[] = []
   for (const r of rows) {
     const failing = r.gate.checks.filter((c) => !c.ok)
+    if (r.report.recommendation.kind === "KILLED") {
+      items.push({
+        tone: "urgent",
+        title: `${r.f.name} was killed by its guardrail`,
+        detail: r.report.recommendation.reason,
+        href: `/features/${r.f.key}`,
+        action: "See what tripped",
+      })
+      continue
+    }
     if (r.review.kind === "OVERDUE") {
       items.push({
         tone: "urgent",
@@ -155,7 +194,7 @@ export function briefing(rows: Row[], quarantined: { flag: string; events: numbe
         title: `${r.f.name}: final on ${longDate(final ?? r.review.at)}`,
         detail:
           "Its test window is still open. Don't expand the rollout on early numbers." +
-          (r.report.kpis.some((k) => !k.significant && k.power.required !== null && !k.power.reached && k.power.reachedOn && k.power.reachedOn.getTime() - Date.now() > 365 * 86_400_000)
+          (r.report.kpis.some((k) => k.role === "PRIMARY" && !k.significant && k.power.required !== null && !k.power.reached && k.power.reachedOn && k.power.reachedOn.getTime() - Date.now() > 365 * 86_400_000)
             ? " One of its KPIs can't be proven at this traffic, so judge it on the others."
             : ""),
         href: `/features/${r.f.key}`,

@@ -1,4 +1,4 @@
-import { CircleCheck, CircleDashed, CircleX, Hourglass, RefreshCw, TrendingUp } from "lucide-react"
+import { CircleCheck, CircleDashed, CircleX, Hourglass, OctagonX, RefreshCw, TrendingUp } from "lucide-react"
 import { STATUS_LABEL, type FeatureStatus } from "@/lib/domain"
 import type { Recommendation } from "@/lib/analytics/report"
 import { cn } from "@/lib/utils"
@@ -15,6 +15,7 @@ const REC = {
   SCALE: { label: "Scale", icon: TrendingUp, dot: "bg-status-good" },
   ITERATE: { label: "Iterate", icon: RefreshCw, dot: "bg-status-warning" },
   RETIRE: { label: "Retire", icon: CircleX, dot: "bg-status-critical" },
+  KILLED: { label: "Killed by guardrail", icon: OctagonX, dot: "bg-status-critical" },
   KEEP_MEASURING: { label: "Keep measuring", icon: Hourglass, dot: "bg-muted-foreground" },
   NOT_LIVE: { label: "Not live", icon: CircleDashed, dot: "bg-border" },
 } as const

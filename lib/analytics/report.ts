@@ -1,20 +1,25 @@
 import { db } from "@/lib/db"
 import type { AttributionMethod, KpiCalculation } from "@/lib/domain"
 import { ADMITTED } from "@/lib/registry"
-import { holm, moments, srmPValue, twoProportion, welch, type TestResult } from "./stats"
+import { diffInDiffProportions, holm, moments, msprtPValue, srmPValue, twoProportion, welch, type TestResult } from "./stats"
 import { requiredPerArm } from "./power"
 import type { Prisma } from "@/lib/generated/tnimpact/client"
 
 /**
  * The ROI calculation layer. For one feature it:
- *  1. splits events into a control and a treatment arm per the attribution plan,
+ *  1. splits events into arms per the attribution plan (A/B, phased rollout,
+ *     or pre/post, netted against holdout districts when there are any),
  *  2. computes each declared KPI per arm using the catalogue's definition,
- *  3. tests whether the difference is real,
- *  4. monetises only the statistically significant improvements, and
- *  5. sets ROI = (benefits − costs) / costs over the feature's horizon.
+ *  3. tests each difference twice: a fixed-horizon test (the final verdict)
+ *     and an always-valid sequential test (safe to watch live, and what lets
+ *     a clear result be called before the window closes),
+ *  4. checks guardrail KPIs for harm, which trips the kill switch,
+ *  5. monetises only the statistically significant primary effects, and
+ *  6. sets ROI = (benefits − costs) / costs, as a low / base / high band.
  */
 
 export const SIGNIFICANCE = 0.05
+export const SRM_THRESHOLD = 0.001
 const DAY = 86_400_000
 
 export const featureWithSpec = {
@@ -23,7 +28,7 @@ export const featureWithSpec = {
 export type FeatureWithSpec = Prisma.FeatureGetPayload<typeof featureWithSpec>
 type FeatureKpiWithDef = FeatureWithSpec["kpis"][number]
 
-type EventRow = { userId: string; action: string; value: number | null; variant: string | null; timestamp: Date }
+type EventRow = { userId: string; action: string; value: number | null; variant: string | null; timestamp: Date; district?: string }
 
 export type ArmValue = { n: number; value: number | null }
 
@@ -33,6 +38,8 @@ export type KpiResult = {
   name: string
   unit: string
   category: string
+  /** PRIMARY: what the feature is for. GUARDRAIL: must not get worse; harm trips the kill switch. */
+  role: "PRIMARY" | "GUARDRAIL"
   /** what an arm's `n` counts: users for ratio and per-1k KPIs, events for means */
   sampleUnit: "users" | "events"
   direction: string
@@ -41,20 +48,29 @@ export type KpiResult = {
   targetDelta: number
   control: ArmValue
   treatment: ArmValue
-  /** treatment − control, in KPI units */
+  /** treatment − control in KPI units (holdout-adjusted when the feature has holdout districts) */
   delta: number | null
   /** delta signed so that positive always means "better" */
   improvement: number | null
   ciLow: number | null
   ciHigh: number | null
-  /** raw p-value from the KPI's own test */
+  /** raw fixed-horizon p-value */
   pValue: number | null
-  /** Holm-adjusted across this feature's KPIs; this is what significance uses */
+  /** Holm-adjusted across the feature's primary KPIs; this is what the final verdict uses */
   pAdjusted: number | null
+  /** always-valid sequential (mSPRT) p-value: valid however often the dashboard is looked at */
+  pSequential: number | null
   significant: boolean
   targetMet: boolean
+  /** Guardrails only: significantly worse under the sequential test */
+  tripped: boolean
   /** ₹/month; 0 unless the effect is significant */
   monthlyBenefit: number
+  /** ₹ per unit this KPI would need to be worth for the feature to break even (others as assumed) */
+  breakEvenValue: number | null
+  valuePerUnit: number
+  /** Pre/post with holdout districts: how much each group moved, before netting out */
+  seasonal: { treatedChange: number; holdoutChange: number; holdoutDistricts: string[] } | null
   /** Sample needed per arm to detect the spec's target change (α 0.05, power 0.8) */
   power: { required: number | null; current: number; reached: boolean; reachedOn: Date | null }
 }
@@ -62,6 +78,7 @@ export type KpiResult = {
 export type Recommendation =
   | { kind: "NOT_LIVE"; reason: string }
   | { kind: "KEEP_MEASURING"; reason: string }
+  | { kind: "KILLED"; reason: string }
   | { kind: "SCALE" | "ITERATE" | "RETIRE"; reason: string }
 
 export type FeatureReport = {
@@ -71,6 +88,8 @@ export type FeatureReport = {
   windowMet: boolean
   sampleMet: boolean
   credible: boolean
+  /** true when the result became final before the window closed, via the sequential test */
+  decidedEarly: boolean
   monthlyBenefit: number
   oneTimeCost: number
   monthlyCost: number
@@ -81,48 +100,73 @@ export type FeatureReport = {
   srm: { expectedShare: number; observedShare: number; control: number; treatment: number; pValue: number | null; ok: boolean } | null
   /** When "keep measuring" ends, projected from the traffic seen so far */
   credibility: { windowClosesOn: Date | null; sampleReachedOn: Date | null; credibleOn: Date | null; perArmPerDay: number }
-  /** ROI if the spec's ₹ values are 50%, 100% and 150% of what was assumed */
-  sensitivity: { factor: number; roi: number | null }[]
+  /** ROI with every ₹ value at its low, assumed and high estimate */
+  sensitivity: { label: "low" | "base" | "high"; roi: number | null }[]
   /** Fraction of the assumed ₹ values at which proven value exactly covers cost */
   breakEvenFactor: number | null
+  killed: { at: Date; reason: string } | null
   recommendation: Recommendation
 }
-
-export const SRM_THRESHOLD = 0.001
 
 function armsFor(method: AttributionMethod): [string, string] {
   return method === "PRE_POST" ? ["Before release", "After release"] : ["Control", "Treatment"]
 }
 
-async function loadEvents(feature: FeatureWithSpec, actions: string[]): Promise<{ control: EventRow[]; treatment: EventRow[] }> {
-  const select = { userId: true, action: true, value: true, variant: true, timestamp: true } as const
+type Loaded = { control: EventRow[]; treatment: EventRow[]; holdout: { before: EventRow[]; after: EventRow[] } | null }
+
+async function loadEvents(feature: FeatureWithSpec, actions: string[]): Promise<Loaded> {
+  const select = { userId: true, action: true, value: true, variant: true, timestamp: true, context: true } as const
   if (feature.attributionMethod === "PRE_POST") {
-    if (!feature.releasedAt) return { control: [], treatment: [] }
+    if (!feature.releasedAt) return { control: [], treatment: [], holdout: null }
     // Equal-length windows either side of the release. Events from other
     // experiments (a different flag) are excluded so they don't contaminate.
     const released = feature.releasedAt.getTime()
     const span = feature.observationDays * DAY
-    const rows = await db.event.findMany({
-      where: {
-        ...ADMITTED,
-        action: { in: actions },
-        OR: [{ featureFlag: null }, { featureFlag: feature.key }],
-        timestamp: { gte: new Date(released - span), lt: new Date(released + span) },
-      },
-      select,
-    })
+    const rows = (
+      await db.event.findMany({
+        where: {
+          ...ADMITTED,
+          action: { in: actions },
+          OR: [{ featureFlag: null }, { featureFlag: feature.key }],
+          timestamp: { gte: new Date(released - span), lt: new Date(released + span) },
+        },
+        select,
+      })
+    ).map(({ context, ...e }) => ({ ...e, district: districtOf(context) }))
+    const holdouts = feature.holdoutDistricts
+      .split(",")
+      .map((d) => d.trim())
+      .filter(Boolean)
+    const before = (e: EventRow) => e.timestamp.getTime() < released
+    if (holdouts.length === 0) {
+      return { control: rows.filter(before), treatment: rows.filter((e) => !before(e)), holdout: null }
+    }
+    const inHoldout = (e: EventRow) => holdouts.includes(e.district ?? "")
+    const treated = rows.filter((e) => !inHoldout(e))
+    const held = rows.filter(inHoldout)
     return {
-      control: rows.filter((e) => e.timestamp.getTime() < released),
-      treatment: rows.filter((e) => e.timestamp.getTime() >= released),
+      control: treated.filter(before),
+      treatment: treated.filter((e) => !before(e)),
+      holdout: { before: held.filter(before), after: held.filter((e) => !before(e)) },
     }
   }
   const rows = await db.event.findMany({
     where: { ...ADMITTED, featureFlag: feature.key, action: { in: actions }, variant: { in: ["control", "treatment"] } },
-    select,
+    select: { userId: true, action: true, value: true, variant: true, timestamp: true },
   })
   return {
     control: rows.filter((e) => e.variant === "control"),
     treatment: rows.filter((e) => e.variant === "treatment"),
+    holdout: null,
+  }
+}
+
+function districtOf(context: string): string | undefined {
+  try {
+    const d = JSON.parse(context)?.district
+    return typeof d === "string" ? d : undefined
+  } catch {
+    return undefined
   }
 }
 
@@ -164,22 +208,37 @@ function test(c: ArmComputation, t: ArmComputation): TestResult | null {
 }
 
 /** Per-KPI result before Holm: significance and benefit are settled across all KPIs in buildReport. */
-function kpiResult(fk: FeatureKpiWithDef, control: EventRow[], treatment: EventRow[]): KpiResult {
+function kpiResult(fk: FeatureKpiWithDef, data: Loaded, holdoutDistricts: string[]): KpiResult {
   const { kpi } = fk
   const calc = kpi.calculation as KpiCalculation
-  const c = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, control)
-  const t = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, treatment)
-  const r = test(c, t)
+  const c = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, data.control)
+  const t = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, data.treatment)
+
+  let r: TestResult | null
+  let seasonal: KpiResult["seasonal"] = null
+  if (data.holdout && calc === "USER_RATIO") {
+    const hb = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, data.holdout.before)
+    const ha = computeArm(calc, kpi.numeratorAction, kpi.denominatorAction, data.holdout.after)
+    const cell = (a: ArmComputation): [number, number] => (a.kind === "ratio" ? [a.x, a.n] : [0, 0])
+    const did = diffInDiffProportions({ tBefore: cell(c), tAfter: cell(t), hBefore: cell(hb), hAfter: cell(ha) })
+    r = did
+    if (did) seasonal = { treatedChange: did.treatedChange, holdoutChange: did.holdoutChange, holdoutDistricts }
+  } else {
+    r = test(c, t)
+  }
+
+  const role = fk.role === "GUARDRAIL" ? "GUARDRAIL" : "PRIMARY"
   const sign = kpi.direction === "DOWN" ? -1 : 1
   const improvement = r ? r.diff * sign : null
-  const significant = !!r && r.pValue < SIGNIFICANCE
-  const targetImprovement = Math.abs(fk.targetDelta)
+  const tau = Math.abs(fk.targetDelta) || Math.abs(fk.baseline) * 0.1 || 1
+  const pSequential = r ? msprtPValue(r.diff, r.se, tau) : null
   return {
     featureKpiId: fk.id,
     key: kpi.key,
     name: kpi.name,
     unit: kpi.unit,
     category: kpi.category,
+    role,
     sampleUnit: calc === "MEAN_VALUE" ? "events" : "users",
     direction: kpi.direction,
     baseline: fk.baseline,
@@ -193,25 +252,36 @@ function kpiResult(fk: FeatureKpiWithDef, control: EventRow[], treatment: EventR
     ciHigh: r?.ciHigh ?? null,
     pValue: r?.pValue ?? null,
     pAdjusted: r?.pValue ?? null,
-    significant,
-    targetMet: significant && improvement !== null && improvement >= targetImprovement,
-    monthlyBenefit: significant && improvement !== null ? improvement * fk.monthlyVolume * fk.valuePerUnit : 0,
+    pSequential,
+    significant: false,
+    targetMet: false,
+    tripped: role === "GUARDRAIL" && improvement !== null && improvement < 0 && pSequential !== null && pSequential < SIGNIFICANCE,
+    monthlyBenefit: 0,
+    breakEvenValue: null,
+    valuePerUnit: fk.valuePerUnit,
+    seasonal,
     power: { required: null, current: 0, reached: false, reachedOn: null },
   }
 }
 
-/** Re-decide significance with Holm-adjusted p-values; benefit only follows a surviving effect. */
-function applyHolm(kpis: KpiResult[], specs: FeatureKpiWithDef[]): KpiResult[] {
-  const adjusted = holm(kpis.map((k) => k.pValue))
+/**
+ * Settle significance. Primary KPIs are Holm-corrected together (several
+ * chances at a win shouldn't inflate false wins). Guardrails are safety checks,
+ * judged on their own. Only a significant effect is worth ₹.
+ */
+function settle(kpis: KpiResult[], specs: FeatureKpiWithDef[]): KpiResult[] {
+  const primaryIdx = kpis.map((k, i) => (k.role === "PRIMARY" ? i : -1)).filter((i) => i >= 0)
+  const adjusted = holm(primaryIdx.map((i) => kpis[i].pValue))
   return kpis.map((k, i) => {
-    const pAdjusted = adjusted[i]
+    const pos = primaryIdx.indexOf(i)
+    const pAdjusted = pos >= 0 ? adjusted[pos] : k.pValue
     const significant = pAdjusted !== null && pAdjusted < SIGNIFICANCE
     const fk = specs[i]
     return {
       ...k,
       pAdjusted,
       significant,
-      targetMet: significant && k.improvement !== null && k.improvement >= Math.abs(fk.targetDelta),
+      targetMet: k.role === "PRIMARY" && significant && k.improvement !== null && k.improvement >= Math.abs(fk.targetDelta),
       monthlyBenefit: significant && k.improvement !== null ? k.improvement * fk.monthlyVolume * fk.valuePerUnit : 0,
     }
   })
@@ -238,10 +308,20 @@ async function sampleRatio(feature: FeatureWithSpec): Promise<FeatureReport["srm
 }
 
 const addDays = (from: Date, days: number) => new Date(from.getTime() + Math.ceil(days) * DAY)
+const shortDate = (d: Date) => d.toLocaleDateString("en-IN", { day: "numeric", month: "short" })
 
 function recommend(feature: FeatureWithSpec, r: Omit<FeatureReport, "recommendation">): Recommendation {
   if (feature.status !== "SHIPPED" && feature.status !== "RETIRED") {
     return { kind: "NOT_LIVE", reason: "Not released yet — nothing to measure." }
+  }
+  const tripped = r.kpis.filter((k) => k.tripped)
+  if (r.killed || tripped.length > 0) {
+    return {
+      kind: "KILLED",
+      reason:
+        r.killed?.reason ??
+        `Guardrail breached: ${tripped.map((k) => k.name.toLowerCase()).join(" and ")} got significantly worse. The kill switch turns the feature off.`,
+    }
   }
   if (r.srm && !r.srm.ok) {
     return {
@@ -249,33 +329,32 @@ function recommend(feature: FeatureWithSpec, r: Omit<FeatureReport, "recommendat
       reason: `The traffic split is broken: planned ${Math.round(r.srm.expectedShare * 100)}% treatment, got ${(r.srm.observedShare * 100).toFixed(1)}%. No result from this test can be trusted until assignment is fixed.`,
     }
   }
-  const when = r.credibility.credibleOn
-    ? ` Final on ${r.credibility.credibleOn.toLocaleDateString("en-IN", { day: "numeric", month: "short" })} at current traffic.`
-    : ""
-  if (!r.windowMet) {
-    return {
-      kind: "KEEP_MEASURING",
-      reason: `${r.observedDays} of ${feature.observationDays} observation days elapsed.${when}`,
-    }
+  const when = r.credibility.credibleOn ? ` Final by ${shortDate(r.credibility.credibleOn)} at current traffic.` : ""
+  if (!r.credible && !r.windowMet) {
+    return { kind: "KEEP_MEASURING", reason: `${r.observedDays} of ${feature.observationDays} observation days elapsed.${when}` }
   }
-  if (!r.sampleMet) {
+  if (!r.credible) {
     return {
       kind: "KEEP_MEASURING",
       reason: `Needs ${feature.minSamplePerArm} per arm; smallest arm has ${Math.min(...r.kpis.flatMap((k) => [k.control.n, k.treatment.n]))}.${when}`,
     }
   }
+  const early = r.decidedEarly ? " Called early: the sequential test is already conclusive." : ""
   const worse = r.kpis.filter((k) => k.significant && (k.improvement ?? 0) < 0).map((k) => k.name.toLowerCase())
   const roi = r.roi ?? -1
-  if (roi >= 0.5) return { kind: "SCALE", reason: `Proven ROI of ${(roi * 100).toFixed(0)}% over ${feature.horizonMonths} months.` }
-  if (roi >= 0) return { kind: "ITERATE", reason: "Pays back, but below the 50% bar for scaling. Improve the weakest KPI." }
-  const proven = r.kpis.filter((k) => k.significant && (k.improvement ?? 0) > 0).length
+  if (roi >= 0.5) return { kind: "SCALE", reason: `Proven ROI of ${(roi * 100).toFixed(0)}% over ${feature.horizonMonths} months.${early}` }
+  if (roi >= 0) return { kind: "ITERATE", reason: `Pays back, but below the 50% bar for scaling. Improve the weakest KPI.${early}` }
+  const proven = r.kpis.filter((k) => k.role === "PRIMARY" && k.significant && (k.improvement ?? 0) > 0).length
+  const seasonal = r.kpis.some((k) => k.seasonal)
   return {
     kind: "RETIRE",
     reason:
       worse.length > 0
         ? `Made ${worse.join(" and ")} significantly worse, and costs exceed proven benefits.`
         : proven === 0
-          ? "No KPI moved significantly after the full observation window."
+          ? seasonal
+            ? "Once the holdout districts net out the season, no KPI moved significantly."
+            : "No KPI moved significantly after the full observation window."
           : "Proven benefits don't cover the cost.",
   }
 }
@@ -285,15 +364,19 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
     ...new Set(feature.kpis.flatMap((fk) => [fk.kpi.numeratorAction, fk.kpi.denominatorAction].filter((a): a is string => !!a))),
   ]
   const live = !!feature.releasedAt
-  const [{ control, treatment }, srm] = await Promise.all([
-    live ? loadEvents(feature, actions) : Promise.resolve({ control: [] as EventRow[], treatment: [] as EventRow[] }),
+  const holdoutDistricts = feature.holdoutDistricts
+    .split(",")
+    .map((d) => d.trim())
+    .filter(Boolean)
+  const [data, srm] = await Promise.all([
+    live ? loadEvents(feature, actions) : Promise.resolve<Loaded>({ control: [], treatment: [], holdout: null }),
     sampleRatio(feature),
   ])
   const observedDays = feature.releasedAt ? Math.floor((now.getTime() - feature.releasedAt.getTime()) / DAY) : 0
   const daysRunning = Math.max(1, Math.min(observedDays, feature.attributionMethod === "PRE_POST" ? feature.observationDays : observedDays))
 
-  const kpis = applyHolm(
-    feature.kpis.map((fk) => kpiResult(fk, control, treatment)),
+  const kpis = settle(
+    feature.kpis.map((fk) => kpiResult(fk, data, holdoutDistricts)),
     feature.kpis,
   ).map((k, i) => {
     // Power: the sample this KPI needs to detect its own target, and when traffic gets it there.
@@ -306,11 +389,19 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
     return { ...k, power: { required, current, reached, reachedOn } }
   })
 
+  const primaries = kpis.filter((k) => k.role === "PRIMARY")
   const windowMet = live && observedDays >= feature.observationDays
-  const sampleMet = kpis.length > 0 && kpis.every((k) => k.control.n >= feature.minSamplePerArm && k.treatment.n >= feature.minSamplePerArm)
+  const sampleMet = primaries.length > 0 && primaries.every((k) => k.control.n >= feature.minSamplePerArm && k.treatment.n >= feature.minSamplePerArm)
+  // Sequential early call: every primary KPI conclusive under the always-valid
+  // test (Holm-adjusted), with the sample floor met and the split healthy.
+  const seqAdjusted = holm(primaries.map((k) => k.pSequential))
+  const conclusiveEarly = primaries.length > 0 && seqAdjusted.every((p) => p !== null && p < SIGNIFICANCE)
+  const splitOk = srm?.ok ?? true
+  const credible = live && sampleMet && splitOk && (windowMet || conclusiveEarly)
+  const decidedEarly = credible && !windowMet
 
   // "Keep measuring" as a countdown: the window's close, and when the slowest arm reaches the minimum sample.
-  const smallest = kpis.length ? Math.min(...kpis.flatMap((k) => [k.control.n, k.treatment.n])) : 0
+  const smallest = primaries.length ? Math.min(...primaries.flatMap((k) => [k.control.n, k.treatment.n])) : 0
   const perArmPerDay = live ? smallest / daysRunning : 0
   const windowClosesOn = feature.releasedAt ? addDays(feature.releasedAt, feature.observationDays) : null
   const sampleReachedOn =
@@ -327,13 +418,34 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
   const totalBenefit = monthlyBenefit * feature.horizonMonths
   const roi = live && totalCost > 0 ? (totalBenefit - totalCost) / totalCost : null
 
+  // ₹ band: every KPI at its low / high ₹ estimate (half / one-and-a-half the assumed value when none was given).
+  const benefitAt = (pick: (fk: FeatureKpiWithDef) => number) =>
+    kpis.reduce((a, k, i) => (k.significant && k.improvement !== null ? a + k.improvement * feature.kpis[i].monthlyVolume * pick(feature.kpis[i]) : a), 0) *
+    feature.horizonMonths
+  const roiFor = (benefit: number) => (live && totalCost > 0 ? (benefit - totalCost) / totalCost : null)
+  const sensitivity: FeatureReport["sensitivity"] = [
+    { label: "low", roi: roiFor(benefitAt((fk) => fk.valueLow ?? fk.valuePerUnit * 0.5)) },
+    { label: "base", roi },
+    { label: "high", roi: roiFor(benefitAt((fk) => fk.valueHigh ?? fk.valuePerUnit * 1.5)) },
+  ]
+
+  // Break-even ₹ per unit for each proven, positive KPI, holding the others at their assumed values.
+  const withBreakEven = kpis.map((k, i) => {
+    const fk = feature.kpis[i]
+    const perUnitValue = k.significant && k.improvement !== null && k.improvement > 0 ? k.improvement * fk.monthlyVolume * feature.horizonMonths : 0
+    if (!live || perUnitValue <= 0) return k
+    const others = totalBenefit - k.monthlyBenefit * feature.horizonMonths
+    return { ...k, breakEvenValue: Math.max(0, (totalCost - others) / perUnitValue) }
+  })
+
   const partial = {
-    kpis,
+    kpis: withBreakEven,
     armLabels: armsFor(feature.attributionMethod as AttributionMethod),
     observedDays,
     windowMet,
     sampleMet,
-    credible: windowMet && sampleMet && (srm?.ok ?? true),
+    credible,
+    decidedEarly,
     monthlyBenefit,
     oneTimeCost,
     monthlyCost,
@@ -342,11 +454,9 @@ export async function buildReport(feature: FeatureWithSpec, now = new Date()): P
     roi,
     srm,
     credibility: { windowClosesOn, sampleReachedOn, credibleOn, perArmPerDay },
-    sensitivity: [0.5, 1, 1.5].map((factor) => ({
-      factor,
-      roi: live && totalCost > 0 ? (totalBenefit * factor - totalCost) / totalCost : null,
-    })),
+    sensitivity,
     breakEvenFactor: live && totalBenefit > 0 ? totalCost / totalBenefit : null,
+    killed: feature.killedAt ? { at: feature.killedAt, reason: feature.killReason ?? "Kill switch tripped." } : null,
   }
   return { ...partial, recommendation: recommend(feature, partial) }
 }

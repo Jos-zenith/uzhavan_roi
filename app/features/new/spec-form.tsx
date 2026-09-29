@@ -18,7 +18,29 @@ import { cn } from "@/lib/utils"
 import { daysNeeded, expectedPerArm, requiredPerArm } from "@/lib/analytics/power"
 
 type KpiOption = { id: string; name: string; unit: string; direction: string; calculation: string }
-type KpiRow = { kpiId: string; baseline: string; targetDelta: string; monthlyVolume: string; valuePerUnit: string; valueSource: string }
+type KpiRow = {
+  kpiId: string
+  role: "PRIMARY" | "GUARDRAIL"
+  baseline: string
+  targetDelta: string
+  monthlyVolume: string
+  valuePerUnit: string
+  valueLow: string
+  valueHigh: string
+  valueSource: string
+}
+const emptyRow = (role: KpiRow["role"] = "PRIMARY"): KpiRow => ({
+  kpiId: "",
+  role,
+  baseline: "",
+  targetDelta: "",
+  monthlyVolume: "",
+  valuePerUnit: "",
+  valueLow: "",
+  valueHigh: "",
+  valueSource: "",
+})
+const optionalNumber = (v: string) => (v.trim() === "" ? null : Number(v))
 
 const input =
   "h-9 w-full rounded-md border border-input bg-background px-3 text-sm outline-none focus-visible:ring-2 focus-visible:ring-ring"
@@ -43,7 +65,8 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
   const [owner, setOwner] = useState("")
   const [team, setTeam] = useState("")
   const [goals, setGoals] = useState<{ type: GoalType; statement: string }[]>([{ type: "REVENUE", statement: "" }])
-  const [rows, setRows] = useState<KpiRow[]>([{ kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "", valueSource: "" }])
+  const [rows, setRows] = useState<KpiRow[]>([emptyRow()])
+  const [holdout, setHoldout] = useState("")
   const [method, setMethod] = useState<AttributionMethod>("AB_TEST")
   const [share, setShare] = useState("50") // % of traffic in treatment
   const [segment, setSegment] = useState("")
@@ -80,10 +103,14 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
             monthlyVolume: Number(r.monthlyVolume),
             valuePerUnit: Number(r.valuePerUnit),
             valueSource: r.valueSource,
+            valueLow: optionalNumber(r.valueLow),
+            valueHigh: optionalNumber(r.valueHigh),
+            role: r.role,
           }
         }),
         attributionMethod: method,
         treatmentShare: method === "PRE_POST" ? 0.5 : Number(share) / 100,
+        holdoutDistricts: method === "PRE_POST" ? holdout : "",
         segment,
         minSamplePerArm: Number(minSample),
         observationDays: Number(windowDays),
@@ -168,10 +195,12 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
         )}
       </Section>
 
-      <Section title="3 · KPIs from the shared catalogue (1–3)">
+      <Section title="3 · KPIs from the shared catalogue (1–3 primary, up to 2 guardrails)">
         <p className="text-sm text-muted-foreground">
-          Baseline and target change say what success looks like. Volume and ₹ value turn a KPI change into money:
-          benefit per month = improvement × volume × value.
+          Primary KPIs are what the feature is for: baseline and target say what success looks like, and volume and ₹
+          value turn a change into money. Guardrails are what it must not break, such as payment failures; for those,
+          the target is the worsening you&apos;d tolerate. Significant harm on a guardrail turns the feature off
+          automatically.
         </p>
         {rows.map((r, i) => {
           const k = kpiById.get(r.kpiId)
@@ -186,6 +215,15 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
                       {o.name}
                     </option>
                   ))}
+                </select>
+                <select
+                  className={cn(input, "w-36 shrink-0")}
+                  value={r.role}
+                  onChange={(e) => setRow(i, { role: e.target.value as KpiRow["role"] })}
+                  aria-label="KPI role"
+                >
+                  <option value="PRIMARY">Primary</option>
+                  <option value="GUARDRAIL">Guardrail</option>
                 </select>
                 {rows.length > 1 && <RemoveButton onClick={() => setRows(rows.filter((_, j) => j !== i))} />}
               </div>
@@ -202,6 +240,12 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
                   </Field>
                   <Field label="₹ value per unit" hint={k.unit === "RATIO" ? "₹ per extra converting user" : k.unit === "SECONDS" ? "₹ per second saved" : "₹ per avoided event"}>
                     <input className={input} type="number" step="any" min={0} required value={r.valuePerUnit} onChange={(e) => setRow(i, { valuePerUnit: e.target.value })} />
+                  </Field>
+                  <Field label="₹ low estimate" hint="pessimistic; blank = half the assumed value">
+                    <input className={input} type="number" step="any" min={0} value={r.valueLow} onChange={(e) => setRow(i, { valueLow: e.target.value })} />
+                  </Field>
+                  <Field label="₹ high estimate" hint="optimistic; blank = 1.5× the assumed value">
+                    <input className={input} type="number" step="any" min={0} value={r.valueHigh} onChange={(e) => setRow(i, { valueHigh: e.target.value })} />
                   </Field>
                   <div className="sm:col-span-2 lg:col-span-4">
                     <Field label="Where does the ₹ value come from?" hint="A report, ledger or model someone can check. The spec can't be approved without one.">
@@ -223,11 +267,14 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
             </div>
           )
         })}
-        {rows.length < 3 && (
-          <AddButton onClick={() => setRows([...rows, { kpiId: "", baseline: "", targetDelta: "", monthlyVolume: "", valuePerUnit: "", valueSource: "" }])}>
-            Add KPI
-          </AddButton>
-        )}
+        <div className="flex flex-wrap gap-2">
+          {rows.filter((r) => r.role === "PRIMARY").length < 3 && rows.length < 5 && (
+            <AddButton onClick={() => setRows([...rows, emptyRow()])}>Add primary KPI</AddButton>
+          )}
+          {rows.filter((r) => r.role === "GUARDRAIL").length < 2 && rows.length < 5 && (
+            <AddButton onClick={() => setRows([...rows, emptyRow("GUARDRAIL")])}>Add guardrail</AddButton>
+          )}
+        </div>
       </Section>
 
       <Section title="4 · Experiment and attribution plan">
@@ -251,6 +298,14 @@ export function SpecForm({ kpis, initialFlag }: { kpis: KpiOption[]; initialFlag
             </button>
           ))}
         </div>
+        {method === "PRE_POST" && (
+          <Field
+            label="Holdout districts (strongly recommended)"
+            hint="Comma-separated districts that won't get the feature. Their change over the same weeks is subtracted, so a season or a price swing isn't credited to the feature."
+          >
+            <input className={input} value={holdout} onChange={(e) => setHoldout(e.target.value)} placeholder="e.g. Salem, Erode" />
+          </Field>
+        )}
         <Field label="Traffic / segment in scope">
           <input className={input} required value={segment} onChange={(e) => setSegment(e.target.value)} placeholder="e.g. 50/50 split of returning buyers in delta districts" />
         </Field>

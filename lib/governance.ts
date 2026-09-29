@@ -20,25 +20,29 @@ const NEXT: Partial<Record<FeatureStatus, FeatureStatus>> = {
 
 export function specChecks(f: FeatureWithSpec): Check[] {
   const goals = parseGoals(f.goals)
+  // Targets, money and power apply to what the feature is for; guardrails only have to exist and be measured.
+  const primaries = f.kpis.filter((k) => k.role !== "GUARDRAIL")
+  const guardrails = f.kpis.length - primaries.length
   return [
     { label: "1–3 business goals declared", ok: goals.length >= 1 && goals.length <= 3, detail: `${goals.length} declared` },
-    { label: "1–3 KPIs from the shared catalogue", ok: f.kpis.length >= 1 && f.kpis.length <= 3, detail: `${f.kpis.length} mapped` },
+    { label: "1–3 primary KPIs from the shared catalogue", ok: primaries.length >= 1 && primaries.length <= 3, detail: `${primaries.length} primary, ${guardrails} guardrail` },
+    { label: "At most 2 guardrail KPIs", ok: guardrails <= 2 },
     {
       label: "Every KPI has a baseline and a non-zero target delta",
-      ok: f.kpis.length > 0 && f.kpis.every((k) => k.targetDelta !== 0),
+      ok: primaries.length > 0 && primaries.every((k) => k.targetDelta !== 0),
     },
     {
       label: "Every target points the KPI's better direction",
-      ok: f.kpis.every((k) => (k.kpi.direction === "UP" ? k.targetDelta > 0 : k.targetDelta < 0)),
+      ok: primaries.every((k) => (k.kpi.direction === "UP" ? k.targetDelta > 0 : k.targetDelta < 0)),
     },
     {
       label: "Every KPI can be monetised (volume and ₹ value set)",
-      ok: f.kpis.every((k) => k.monthlyVolume > 0 && k.valuePerUnit > 0),
+      ok: primaries.every((k) => k.monthlyVolume > 0 && k.valuePerUnit > 0),
     },
     {
       label: "Every ₹ value names where it comes from",
-      ok: f.kpis.length > 0 && f.kpis.every((k) => k.valueSource.trim().length > 0),
-      detail: f.kpis.filter((k) => !k.valueSource.trim()).map((k) => `missing for ${k.kpi.name.toLowerCase()}`).join("; ") || undefined,
+      ok: primaries.length > 0 && primaries.every((k) => k.valueSource.trim().length > 0),
+      detail: primaries.filter((k) => !k.valueSource.trim()).map((k) => `missing for ${k.kpi.name.toLowerCase()}`).join("; ") || undefined,
     },
     ...powerChecks(f),
     { label: "Attribution plan: segment in scope", ok: f.segment.trim().length > 0 },
@@ -47,6 +51,7 @@ export function specChecks(f: FeatureWithSpec): Check[] {
     { label: "Approved by product", ok: f.productApproved, detail: f.productApprovedBy ?? undefined },
     { label: "Approved by engineering", ok: f.engineeringApproved, detail: f.engineeringApprovedBy ?? undefined },
     { label: "Approved by analytics", ok: f.analyticsApproved, detail: f.analyticsApprovedBy ?? undefined },
+    { label: "₹ values and their range signed off by finance", ok: f.financeApproved, detail: f.financeApprovedBy ?? undefined },
   ]
 }
 
@@ -66,7 +71,7 @@ function powerChecks(f: FeatureWithSpec): Check[] {
       detail: `${Math.round(f.treatmentShare * 100)}% treatment`,
     })
   }
-  for (const k of f.kpis) {
+  for (const k of f.kpis.filter((x) => x.role !== "GUARDRAIL")) {
     const required = requiredPerArm(k.kpi.calculation, k.baseline, k.targetDelta)
     if (required === null) continue
     // Pre/post compares two full windows of traffic, so each "arm" gets all of it.
